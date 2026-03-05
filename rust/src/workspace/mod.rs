@@ -43,6 +43,7 @@ pub struct PreparedWorkspace {
 /// Prepare a workspace for an issue
 ///
 /// Creates the workspace directory if it doesn't exist.
+/// Also creates the root directory if it doesn't exist.
 /// Returns the path and whether it was newly created.
 pub fn prepare_workspace(
     config: &WorkspaceConfig,
@@ -50,6 +51,11 @@ pub fn prepare_workspace(
 ) -> Result<PreparedWorkspace, WorkspaceError> {
     let workspace_key = issue.sanitized_identifier();
     let workspace_path = config.root.join(&workspace_key);
+
+    // Ensure root directory exists
+    if !config.root.exists() {
+        std::fs::create_dir_all(&config.root)?;
+    }
 
     // Validate path containment
     validate_path_containment(&config.root, &workspace_path)?;

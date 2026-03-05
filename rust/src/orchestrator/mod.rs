@@ -8,7 +8,7 @@ mod retry;
 
 pub use state::{OrchestratorState, RunningEntry};
 pub use dispatch::select_candidates;
-pub use retry::compute_backoff;
+pub use retry::{compute_backoff, ExitType};
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -213,7 +213,11 @@ impl<T: Tracker, A: AgentRunner> Orchestrator<T, A> {
                     let attempt = state.retry_attempts.get(&issue_id)
                         .map(|r| r.attempt + 1)
                         .unwrap_or(1);
-                    let backoff_ms = compute_backoff(attempt, self.config.agent.max_retry_backoff_ms);
+                    let backoff_ms = compute_backoff(
+                        ExitType::Failure,
+                        attempt,
+                        self.config.agent.max_retry_backoff_ms
+                    );
 
                     // In full implementation, schedule timer
                 }
