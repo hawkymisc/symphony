@@ -60,16 +60,14 @@ impl AgentRunner for ClaudeRunner {
                 .map_err(|e| AgentError::SpawnFailed(e.to_string()))?;
         }
 
-        // Render prompt
+        // Render prompt from the template stored in config (parsed from WORKFLOW.md at startup)
         let repo = config.tracker.repo.as_deref().unwrap_or("unknown/repo");
-        let prompt = crate::prompt::render_prompt(
-            &crate::workflow::load_workflow(&config.workspace.root.join("WORKFLOW.md"))
-                .map(|w| w.prompt_template)
-                .unwrap_or_else(|_| crate::prompt::DEFAULT_PROMPT_TEMPLATE.to_string()),
-            issue,
-            attempt,
-            repo,
-        )?;
+        let template = if config.prompt_template.is_empty() {
+            crate::prompt::DEFAULT_PROMPT_TEMPLATE.to_string()
+        } else {
+            config.prompt_template.clone()
+        };
+        let prompt = crate::prompt::render_prompt(&template, issue, attempt, repo)?;
 
         // Track tokens
         let mut total_input_tokens: u64 = 0;
@@ -82,6 +80,7 @@ impl AgentRunner for ClaudeRunner {
         cmd.arg("--print")
             .arg("--output-format").arg("stream-json")
             .arg("--model").arg(&config.claude.model)
+            .arg("--max-turns").arg(config.claude.max_turns_per_invocation.to_string())
             .arg("-p").arg(&prompt)
             .current_dir(&workspace_path)
             .stdout(Stdio::piped())

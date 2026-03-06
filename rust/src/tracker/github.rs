@@ -215,6 +215,10 @@ impl GitHubTracker {
         let mut cursor: Option<String> = None;
         let mut pages = 0;
 
+        // GitHub's IssueState enum requires UPPERCASE (OPEN, CLOSED).
+        // Normalize here so config can use lowercase for readability.
+        let states_upper: Vec<String> = states.iter().map(|s| s.to_uppercase()).collect();
+
         loop {
             pages += 1;
             if pages > MAX_PAGES {
@@ -257,7 +261,7 @@ impl GitHubTracker {
             let variables = serde_json::json!({
                 "owner": owner,
                 "repo": repo,
-                "states": states,
+                "states": states_upper,
                 "labels": if labels.is_empty() { serde_json::Value::Null } else { serde_json::json!(labels) },
                 "first": DEFAULT_PAGE_SIZE,
                 "cursor": cursor,

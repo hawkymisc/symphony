@@ -23,7 +23,7 @@ use crate::domain::{Issue, RetryEntry};
 use crate::tracker::Tracker;
 use crate::agent::{AgentRunner, AgentUpdate};
 use crate::observability::RuntimeSnapshot;
-use crate::workspace::{run_before_run_hook, run_after_run_hook};
+use crate::workspace::{prepare_workspace, run_before_run_hook, run_after_run_hook};
 
 /// Messages sent to the orchestrator
 #[derive(Debug)]
@@ -196,10 +196,22 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
         });
 
         let tx_finish = tx.clone();
-        let workspace_path = config.workspace.root.join(issue_clone.sanitized_identifier());
         let hooks = config.hooks.clone();
 
         let task_handle = tokio::spawn(async move {
+            // Prepare workspace (creates dir + runs after_create hook on first use)
+            let workspace_path = match prepare_workspace(&config.workspace, &hooks, &issue_clone).await {
+                Ok(p) => p.path,
+                Err(e) => {
+                    warn!("prepare_workspace failed for issue {}: {}", issue_clone.identifier, e);
+                    let _ = tx_finish.send(OrchestratorMsg::WorkerFinished {
+                        issue_id: issue_clone.id.clone(),
+                        result: Err(crate::agent::AgentError::SpawnFailed(e.to_string())),
+                    });
+                    return;
+                }
+            };
+
             // Run before_run hook (fatal on failure)
             if let Err(e) = run_before_run_hook(&workspace_path, &hooks).await {
                 warn!("before_run hook failed: {}", e);
@@ -247,7 +259,7 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
             match result {
                 Ok(()) => {
                     info!(issue_id = %issue_id, identifier = %identifier, "Worker finished successfully");
-                    // Normal exit -> short continuation delay, then retry if issue still active
+                    // Normal exit -> 1s continuation delay. Reset consecutive failure count.
                     let tx = self.tx.clone();
                     let id = issue_id.clone();
                     let timer_handle = tokio::spawn(async move {
@@ -255,13 +267,9 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                         let _ = tx.send(OrchestratorMsg::RetryIssue { issue_id: id });
                     });
 
-                    let attempt = state.retry_attempts.get(&issue_id)
-                        .map(|r| r.attempt)
-                        .unwrap_or(0)
-                        + 1;
-
+                    // attempt = 0: success resets consecutive failure counter
                     state.retry_attempts.insert(issue_id.clone(), RetryEntry {
-                        attempt,
+                        attempt: 0,
                         due_at: std::time::Instant::now() + Duration::from_millis(1_000),
                         timer_handle,
                         identifier: Some(identifier),
@@ -271,12 +279,14 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                 Err(e) => {
                     warn!(issue_id = %issue_id, identifier = %identifier, error = %e, "Worker failed");
 
-                    let attempt = state.retry_attempts.get(&issue_id)
+                    // Count only consecutive failures (entries with error set)
+                    let failure_count = state.retry_attempts.get(&issue_id)
+                        .filter(|r| r.error.is_some())
                         .map(|r| r.attempt + 1)
                         .unwrap_or(1);
                     let backoff_ms = compute_backoff(
                         ExitType::Failure,
-                        attempt,
+                        failure_count,
                         self.config.agent.max_retry_backoff_ms,
                     );
 
@@ -288,7 +298,7 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                     });
 
                     state.retry_attempts.insert(issue_id.clone(), RetryEntry {
-                        attempt,
+                        attempt: failure_count,
                         due_at: std::time::Instant::now() + Duration::from_millis(backoff_ms),
                         timer_handle,
                         identifier: Some(identifier),

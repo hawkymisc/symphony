@@ -55,6 +55,9 @@ pub struct AppConfig {
     pub agent: AgentConfig,
     #[serde(default)]
     pub claude: ClaudeConfig,
+    /// Prompt template (the Markdown body of the workflow file, not serialized from YAML)
+    #[serde(skip)]
+    pub prompt_template: String,
 }
 
 /// Tracker configuration (GitHub Issues)
@@ -257,6 +260,9 @@ impl AppConfig {
     pub fn from_workflow(workflow: &LoadedWorkflow) -> Result<Self, ConfigError> {
         // Convert Value to AppConfig with defaults
         let mut config: AppConfig = serde_yaml::from_value(workflow.config.clone())?;
+
+        // Preserve the prompt template from the workflow body
+        config.prompt_template = workflow.prompt_template.clone();
 
         // Resolve environment variables
         config.resolve_env()?;
