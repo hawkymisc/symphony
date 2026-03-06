@@ -261,7 +261,7 @@ impl GitHubTracker {
             let variables = serde_json::json!({
                 "owner": owner,
                 "repo": repo,
-                "states": states_upper,
+                "states": &states_upper,
                 "labels": if labels.is_empty() { serde_json::Value::Null } else { serde_json::json!(labels) },
                 "first": DEFAULT_PAGE_SIZE,
                 "cursor": cursor,

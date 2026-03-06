@@ -184,6 +184,11 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
         let agent_runner = Arc::clone(&self.agent_runner);
         let issue_clone = issue.clone();
         let attempt = state.retry_attempts.get(&issue_id).map(|r| r.attempt);
+        // Carry over consecutive failure count so backoff survives handle_retry removing the entry
+        let consecutive_failures = state.retry_attempts.get(&issue_id)
+            .filter(|r| r.error.is_some())
+            .map(|r| r.attempt)
+            .unwrap_or(0);
 
         let (update_tx, mut update_rx) = mpsc::unbounded_channel::<(String, AgentUpdate)>();
 
@@ -240,6 +245,7 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
             identifier,
             issue,
             cancel_token,
+            consecutive_failures,
             started_at: chrono::Utc::now(),
             ..Default::default()
         };
@@ -279,11 +285,10 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                 Err(e) => {
                     warn!(issue_id = %issue_id, identifier = %identifier, error = %e, "Worker failed");
 
-                    // Count only consecutive failures (entries with error set)
-                    let failure_count = state.retry_attempts.get(&issue_id)
-                        .filter(|r| r.error.is_some())
-                        .map(|r| r.attempt + 1)
-                        .unwrap_or(1);
+                    // Increment consecutive failure count carried from RunningEntry.
+                    // (retry_attempts entry was removed by handle_retry before this run,
+                    //  so we read it from RunningEntry which survives dispatch.)
+                    let failure_count = entry.consecutive_failures + 1;
                     let backoff_ms = compute_backoff(
                         ExitType::Failure,
                         failure_count,

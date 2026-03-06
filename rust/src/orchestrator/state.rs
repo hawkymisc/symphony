@@ -44,8 +44,8 @@ pub struct RunningEntry {
     pub last_reported_total: u64,
     /// Turn count
     pub turn_count: u32,
-    /// Retry attempt
-    pub retry_attempt: u32,
+    /// Consecutive failure count (survives dispatch → used for backoff calculation)
+    pub consecutive_failures: u32,
     /// When this entry was started
     pub started_at: DateTime<Utc>,
 }
@@ -69,7 +69,7 @@ impl Default for RunningEntry {
             last_reported_output: 0,
             last_reported_total: 0,
             turn_count: 0,
-            retry_attempt: 0,
+            consecutive_failures: 0,
             started_at: Utc::now(),
         }
     }
