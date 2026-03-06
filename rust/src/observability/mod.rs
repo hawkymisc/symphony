@@ -2,7 +2,7 @@
 
 mod metrics;
 
-pub use metrics::{RuntimeSnapshot, RunningEntrySnapshot, RateLimitInfo};
+pub use metrics::{RuntimeSnapshot, RunningEntrySnapshot, RetryingEntrySnapshot, RateLimitInfo};
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 

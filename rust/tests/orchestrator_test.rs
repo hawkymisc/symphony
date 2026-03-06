@@ -312,20 +312,37 @@ async fn retry_preserves_backoff_on_tracker_error() {
         orchestrator.run(cancel_clone).await;
     });
 
-    // Wait for: dispatch → fail → RetryEntry inserted → timer fires → tracker error → re-insert
-    // Timeline: 50ms poll + instant agent failure + 50ms backoff + some margin = ~200ms
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Poll until the tracker error path has completed (retrying_count == 1 with attempt >= 1)
+    // Expected flow: dispatch → fail → RetryEntry(attempt=1) → timer(50ms) → tracker error → re-insert(attempt=1)
+    // Give up after 1s to avoid hanging if something goes wrong.
+    let snapshot = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx });
+            let snap = timeout(Duration::from_millis(200), reply_rx)
+                .await
+                .expect("snapshot request should complete")
+                .expect("snapshot channel should not be closed");
 
-    // Snapshot should show the issue is still in the retry queue (backoff preserved)
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let _ = tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx });
-    let snapshot = timeout(Duration::from_millis(500), reply_rx)
-        .await
-        .expect("snapshot request should complete")
-        .expect("snapshot channel should not be closed");
+            // Wait until the issue has gone through at least one failure cycle
+            if snap.retrying_count == 1 && snap.retrying.first().map(|e| e.attempt).unwrap_or(0) >= 1 {
+                break snap;
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                panic!("Timed out waiting for retry queue to stabilize after tracker error");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
 
     assert_eq!(snapshot.retrying_count, 1, "Issue should remain in retry queue after tracker error");
     assert_eq!(snapshot.running_count, 0, "Issue should not be running");
+    // Critical: attempt count must be preserved (not reset to 0) after tracker error
+    let entry = &snapshot.retrying[0];
+    assert!(entry.attempt >= 1, "Failure count should be preserved after tracker error (got {})", entry.attempt);
+    assert!(entry.error.is_some(), "RetryEntry should carry the tracker error message");
 
     cancel.cancel();
 }

@@ -127,12 +127,21 @@ impl OrchestratorState {
             })
             .collect();
 
+        let retrying: Vec<crate::observability::RetryingEntrySnapshot> = self.retry_attempts.iter()
+            .map(|(id, entry)| crate::observability::RetryingEntrySnapshot {
+                issue_id: id.clone(),
+                attempt: entry.attempt,
+                error: entry.error.clone(),
+            })
+            .collect();
+
         crate::observability::RuntimeSnapshot {
             generated_at: Utc::now(),
             running_count: running.len(),
-            retrying_count: self.retry_attempts.len(),
+            retrying_count: retrying.len(),
             completed_count: self.completed.len(),
             running,
+            retrying,
             agent_totals: self.agent_totals.clone(),
             rate_limits: self.rate_limits.clone(),
         }

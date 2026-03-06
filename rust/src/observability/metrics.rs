@@ -18,10 +18,23 @@ pub struct RuntimeSnapshot {
     pub completed_count: usize,
     /// Running entries
     pub running: Vec<RunningEntrySnapshot>,
+    /// Retry queue entries (for observability and testing)
+    pub retrying: Vec<RetryingEntrySnapshot>,
     /// Aggregate token totals
     pub agent_totals: TokenTotals,
     /// Rate limit info
     pub rate_limits: Option<RateLimitInfo>,
+}
+
+/// Snapshot of a retrying entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryingEntrySnapshot {
+    /// Issue ID
+    pub issue_id: String,
+    /// Current consecutive failure count (1-indexed)
+    pub attempt: u32,
+    /// Error that caused the retry
+    pub error: Option<String>,
 }
 
 /// Snapshot of a running entry
@@ -73,6 +86,11 @@ mod tests {
             running_count: 2,
             retrying_count: 1,
             completed_count: 5,
+            retrying: vec![RetryingEntrySnapshot {
+                issue_id: "gid://github/Issue/10".to_string(),
+                attempt: 2,
+                error: Some("mock error".to_string()),
+            }],
             running: vec![RunningEntrySnapshot {
                 issue_id: "gid://github/Issue/42".to_string(),
                 identifier: "42".to_string(),
