@@ -12,7 +12,7 @@ use symphony::agent::{AgentError, AgentRunner, AgentUpdate};
 use symphony::config::AppConfig;
 use symphony::domain::Issue;
 use symphony::orchestrator::{Orchestrator, OrchestratorMsg};
-use symphony::tracker::MemoryTracker;
+use symphony::tracker::{MemoryTracker, Tracker, TrackerError};
 
 // ─── MockAgentRunner ──────────────────────────────────────────────────────────
 
@@ -261,6 +261,73 @@ fn retry_backoff_cap() {
     // Attempt 4 would be 80s, capped at 60s
     assert_eq!(compute_backoff(ExitType::Failure, 4, 60_000), 60_000);
     assert_eq!(compute_backoff(ExitType::Failure, 20, 60_000), 60_000);
+}
+
+// ─── tracker error preserves backoff state ────────────────────────────────────
+
+/// Tracker that returns issues on fetch_candidate_issues but always fails fetch_issues_by_ids.
+struct ErrorOnRetryTracker {
+    inner: MemoryTracker,
+}
+
+impl ErrorOnRetryTracker {
+    fn with_issues(issues: Vec<Issue>) -> Self {
+        Self { inner: MemoryTracker::with_issues(issues) }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tracker for ErrorOnRetryTracker {
+    async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+        self.inner.fetch_candidate_issues().await
+    }
+
+    async fn fetch_issues_by_ids(&self, _ids: &[String]) -> Result<Vec<Issue>, TrackerError> {
+        Err(TrackerError::ApiRequest("simulated tracker outage".to_string()))
+    }
+
+    async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, TrackerError> {
+        self.inner.fetch_issues_by_states(states).await
+    }
+}
+
+/// When fetch_issues_by_ids fails during retry, the RetryEntry should be reinserted
+/// with the same failure count so exponential backoff is preserved.
+#[tokio::test]
+async fn retry_preserves_backoff_on_tracker_error() {
+    let tracker = ErrorOnRetryTracker::with_issues(vec![make_open_issue("I_1", "1")]);
+
+    // Agent always fails to create RetryEntry with error
+    let agent = MockAgentRunner::failure();
+
+    let mut config = make_config(5);
+    // Short backoff so the retry timer fires quickly
+    config.agent.max_retry_backoff_ms = 50;
+
+    let (orchestrator, tx) = Orchestrator::new(tracker, agent, config);
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
+    tokio::spawn(async move {
+        orchestrator.run(cancel_clone).await;
+    });
+
+    // Wait for: dispatch → fail → RetryEntry inserted → timer fires → tracker error → re-insert
+    // Timeline: 50ms poll + instant agent failure + 50ms backoff + some margin = ~200ms
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // Snapshot should show the issue is still in the retry queue (backoff preserved)
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let _ = tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx });
+    let snapshot = timeout(Duration::from_millis(500), reply_rx)
+        .await
+        .expect("snapshot request should complete")
+        .expect("snapshot channel should not be closed");
+
+    assert_eq!(snapshot.retrying_count, 1, "Issue should remain in retry queue after tracker error");
+    assert_eq!(snapshot.running_count, 0, "Issue should not be running");
+
+    cancel.cancel();
 }
 
 // ─── Snapshot request ─────────────────────────────────────────────────────────
