@@ -141,10 +141,14 @@ async fn run_nonzero_exit_returns_process_exit_err() {
 
 // ─── cancellation ─────────────────────────────────────────────────────────────
 
-/// ClaudeRunner returns Ok when cancelled mid-run.
+/// ClaudeRunner returns Ok when cancelled mid-run and does not emit TurnComplete.
 #[tokio::test]
 async fn run_mid_run_cancellation_returns_ok() {
-    let config = make_config("slow.sh");
+    let mut config = make_config("heartbeat.sh");
+    // Use short timeouts to avoid long waits if cancellation fails
+    config.claude.read_timeout_ms = 200;
+    config.claude.turn_timeout_ms = 1000;
+
     let issue = make_issue("I_7", "7");
 
     let runner = ClaudeRunner;
@@ -157,8 +161,8 @@ async fn run_mid_run_cancellation_returns_ok() {
         runner.run(&issue, None, &config, tx, cancel_clone).await
     });
 
-    // Give the process time to spawn and start
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // Give the process time to spawn and emit at least one heartbeat
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
     // Cancel mid-run
     cancel.cancel();
@@ -169,10 +173,18 @@ async fn run_mid_run_cancellation_returns_ok() {
     // Cancelled mid-run should return Ok(())
     assert!(result.is_ok(), "Cancelled run should return Ok; got: {:?}", result);
 
-    // Collect any updates that were sent before cancellation
-    while let Ok((_, _)) = rx.try_recv() {
-        // Just drain the channel
+    // Collect all updates and verify TurnComplete was NOT emitted
+    let mut updates = Vec::new();
+    while let Ok((_, upd)) = rx.try_recv() {
+        updates.push(upd);
     }
+
+    let turn_complete = updates.iter().find(|u| matches!(u, AgentUpdate::TurnComplete { .. }));
+    assert!(
+        turn_complete.is_none(),
+        "Cancelled run should NOT emit TurnComplete; got: {:?}",
+        updates
+    );
 }
 
 // ─── command not found ────────────────────────────────────────────────────────
@@ -202,9 +214,11 @@ async fn run_missing_command_returns_claude_not_found() {
 
 // ─── retry attempt in prompt ──────────────────────────────────────────────────
 
-/// ClaudeRunner succeeds on retry attempt (Some(n)) without error.
+/// ClaudeRunner handles different retry attempt values without error.
+/// The actual attempt value is embedded in the prompt passed to the CLI.
 #[tokio::test]
-async fn run_with_retry_attempt_succeeds() {
+async fn run_with_different_retry_attempts_succeeds() {
+    // Test with attempt = Some(1) - first retry
     let config = make_config("success.sh");
     let issue = make_issue("I_9", "9");
 
@@ -212,15 +226,30 @@ async fn run_with_retry_attempt_succeeds() {
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, AgentUpdate)>();
     let cancel = CancellationToken::new();
 
-    let result = runner.run(&issue, Some(2), &config, tx, cancel).await;
+    let result = runner.run(&issue, Some(1), &config, tx, cancel).await;
+    assert!(result.is_ok(), "Run with attempt=1 should succeed; got: {:?}", result);
 
-    assert!(result.is_ok(), "Retry run should succeed; got: {:?}", result);
-
-    let mut has_started = false;
+    // Collect updates
+    let mut updates = Vec::new();
     while let Ok((_, upd)) = rx.try_recv() {
-        if matches!(upd, AgentUpdate::Started { .. }) {
-            has_started = true;
-        }
+        updates.push(upd);
     }
-    assert!(has_started, "Should emit Started update on retry run");
+    assert!(updates.iter().any(|u| matches!(u, AgentUpdate::TurnComplete { .. })));
+
+    // Test with attempt = Some(3) - third retry
+    let config = make_config("success.sh");
+    let issue = make_issue("I_10", "10");
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<(String, AgentUpdate)>();
+    let cancel = CancellationToken::new();
+
+    let result = runner.run(&issue, Some(3), &config, tx, cancel).await;
+    assert!(result.is_ok(), "Run with attempt=3 should succeed; got: {:?}", result);
+
+    // Collect updates
+    let mut updates = Vec::new();
+    while let Ok((_, upd)) = rx.try_recv() {
+        updates.push(upd);
+    }
+    assert!(updates.iter().any(|u| matches!(u, AgentUpdate::TurnComplete { .. })));
 }
