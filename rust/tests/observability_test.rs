@@ -4,8 +4,10 @@
 
 use chrono::{Duration, Utc};
 
-use symphony::domain::{TokenTotals, TokenUsage};
+use symphony::config::AppConfig;
+use symphony::domain::{Issue, TokenTotals, TokenUsage};
 use symphony::observability::{RateLimitInfo, RunningEntrySnapshot, RuntimeSnapshot};
+use symphony::orchestrator::{OrchestratorState, RunningEntry};
 
 // ─── 1. log_includes_issue_context ───────────────────────────────────────────
 
@@ -180,4 +182,106 @@ fn rate_limit_tracking() {
     assert_eq!(rl.remaining, 4500);
     assert_eq!(rl.limit, 5000);
     assert_eq!(rl.source, "github");
+}
+
+// ─── Integration tests using OrchestratorState ───────────────────────────────
+
+fn make_running_entry(identifier: &str, started_at: chrono::DateTime<Utc>) -> RunningEntry {
+    let mut issue = Issue::new(&format!("gid://github/Issue/{identifier}"), identifier, "test");
+    issue.state = "open".to_string();
+    RunningEntry {
+        identifier: identifier.to_string(),
+        issue,
+        started_at,
+        ..Default::default()
+    }
+}
+
+/// to_snapshot() includes elapsed time of running sessions in agent_totals.seconds_running.
+/// This verifies SPEC §13.1: "including active sessions".
+#[test]
+fn snapshot_seconds_running_includes_active_sessions() {
+    let config = AppConfig::default();
+    let mut state = OrchestratorState::new(&config);
+
+    // Add a running entry that started 5 seconds ago
+    let started = Utc::now() - Duration::seconds(5);
+    state.running.insert(
+        "gid://github/Issue/1".to_string(),
+        make_running_entry("1", started),
+    );
+
+    let snapshot = state.to_snapshot();
+
+    // agent_totals.seconds_running should reflect active session time
+    assert!(
+        snapshot.agent_totals.seconds_running >= 5,
+        "Expected >= 5s from active session, got {}",
+        snapshot.agent_totals.seconds_running
+    );
+}
+
+/// Agent token deltas accumulate into agent_totals via handle_agent_update logic.
+/// We simulate this by directly mutating OrchestratorState, mirroring what the
+/// orchestrator does in handle_agent_update.
+#[test]
+fn state_token_aggregation_via_agent_totals() {
+    let config = AppConfig::default();
+    let mut state = OrchestratorState::new(&config);
+
+    // Simulate two sessions worth of token accumulation
+    state.agent_totals.add(&TokenUsage {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_tokens: None,
+        cache_creation_tokens: None,
+    });
+    state.agent_totals.add(&TokenUsage {
+        input_tokens: 200,
+        output_tokens: 100,
+        cache_read_tokens: Some(20),
+        cache_creation_tokens: None,
+    });
+
+    let snapshot = state.to_snapshot();
+    assert_eq!(snapshot.agent_totals.input_tokens, 300);
+    assert_eq!(snapshot.agent_totals.output_tokens, 150);
+    assert_eq!(snapshot.agent_totals.total_tokens, 450);
+    assert_eq!(snapshot.agent_totals.cache_read_tokens, 20);
+}
+
+/// Rate limit info stored in OrchestratorState is reflected in the snapshot.
+#[test]
+fn state_rate_limit_preserved_in_snapshot() {
+    let config = AppConfig::default();
+    let mut state = OrchestratorState::new(&config);
+
+    state.rate_limits = Some(RateLimitInfo {
+        remaining: 3000,
+        limit: 5000,
+        reset_at: Utc::now() + Duration::hours(1),
+        source: "github".to_string(),
+    });
+
+    let snapshot = state.to_snapshot();
+    let rl = snapshot.rate_limits.as_ref().expect("rate_limits should be present");
+    assert_eq!(rl.remaining, 3000);
+    assert_eq!(rl.source, "github");
+}
+
+/// Running entries carry issue_id and identifier through to the snapshot for structured logging.
+#[test]
+fn state_snapshot_carries_log_context() {
+    let config = AppConfig::default();
+    let mut state = OrchestratorState::new(&config);
+
+    state.running.insert(
+        "gid://github/Issue/99".to_string(),
+        make_running_entry("99", Utc::now()),
+    );
+
+    let snapshot = state.to_snapshot();
+    assert_eq!(snapshot.running.len(), 1);
+    assert_eq!(snapshot.running[0].issue_id, "gid://github/Issue/99");
+    assert_eq!(snapshot.running[0].identifier, "99");
 }

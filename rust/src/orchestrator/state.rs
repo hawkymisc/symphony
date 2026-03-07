@@ -124,7 +124,7 @@ impl OrchestratorState {
                 last_event: entry.last_event.clone(),
                 last_event_message: entry.last_event_message.clone(),
                 started_at: entry.started_at,
-                seconds_running: (Utc::now() - entry.started_at).num_milliseconds() as f64 / 1000.0,
+                seconds_running: (Utc::now() - entry.started_at).num_milliseconds().max(0) as f64 / 1000.0,
             })
             .collect();
 
@@ -136,6 +136,15 @@ impl OrchestratorState {
             })
             .collect();
 
+        // Include active-session elapsed time so that agent_totals.seconds_running
+        // reflects "aggregate runtime as of snapshot time, including active sessions"
+        // as required by SPEC §13.1.
+        let mut agent_totals = self.agent_totals.clone();
+        let active_secs: u64 = self.running.values()
+            .map(|e| (Utc::now() - e.started_at).num_milliseconds().max(0) as u64 / 1000)
+            .sum();
+        agent_totals.add_seconds(active_secs);
+
         crate::observability::RuntimeSnapshot {
             generated_at: Utc::now(),
             running_count: running.len(),
@@ -143,7 +152,7 @@ impl OrchestratorState {
             completed_count: self.completed.len(),
             running,
             retrying,
-            agent_totals: self.agent_totals.clone(),
+            agent_totals,
             rate_limits: self.rate_limits.clone(),
         }
     }

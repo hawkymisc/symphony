@@ -262,7 +262,7 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
     ) {
         if let Some(entry) = state.running.remove(&issue_id) {
             let identifier = entry.identifier.clone();
-            let elapsed_secs = (chrono::Utc::now() - entry.started_at).num_seconds() as u64;
+            let elapsed_secs = (chrono::Utc::now() - entry.started_at).num_milliseconds().max(0) as u64 / 1000;
             state.agent_totals.add_seconds(elapsed_secs);
 
             match result {
