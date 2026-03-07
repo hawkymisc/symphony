@@ -124,6 +124,7 @@ impl OrchestratorState {
                 last_event: entry.last_event.clone(),
                 last_event_message: entry.last_event_message.clone(),
                 started_at: entry.started_at,
+                seconds_running: (Utc::now() - entry.started_at).num_milliseconds() as f64 / 1000.0,
             })
             .collect();
 

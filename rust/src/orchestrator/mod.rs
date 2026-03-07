@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{info, warn, info_span, Instrument};
 
 use crate::config::AppConfig;
 use crate::domain::{Issue, RetryEntry};
@@ -198,6 +198,12 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
         let tx_finish = tx.clone();
         let hooks = config.hooks.clone();
 
+        let span = info_span!(
+            "issue",
+            issue_id = %issue_id,
+            identifier = %identifier,
+        );
+
         let task_handle = tokio::spawn(async move {
             // Prepare workspace (creates dir + runs after_create hook on first use)
             let workspace_path = match prepare_workspace(&config.workspace, &hooks, &issue_clone).await {
@@ -233,7 +239,7 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                 issue_id: issue_clone.id.clone(),
                 result,
             });
-        });
+        }.instrument(span));
 
         let entry = RunningEntry {
             task_handle: Some(task_handle),
@@ -256,6 +262,8 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
     ) {
         if let Some(entry) = state.running.remove(&issue_id) {
             let identifier = entry.identifier.clone();
+            let elapsed_secs = (chrono::Utc::now() - entry.started_at).num_seconds() as u64;
+            state.agent_totals.add_seconds(elapsed_secs);
 
             match result {
                 Ok(()) => {
@@ -310,7 +318,9 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
     }
 
     fn handle_agent_update(&self, state: &mut OrchestratorState, issue_id: String, update: AgentUpdate) {
-        if let Some(entry) = state.running.get_mut(&issue_id) {
+        // Extract token deltas before borrowing entry mutably, so we can
+        // update both the entry and agent_totals without borrow conflicts.
+        let token_delta = if let Some(entry) = state.running.get_mut(&issue_id) {
             entry.last_event_timestamp = Some(chrono::Utc::now());
 
             match update {
@@ -320,12 +330,30 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                     entry.input_tokens += input_tokens;
                     entry.output_tokens += output_tokens;
                     entry.total_tokens = entry.input_tokens + entry.output_tokens;
+                    Some((input_tokens, output_tokens))
+                }
+                AgentUpdate::Started { session_id } => {
+                    entry.session_id = Some(session_id);
+                    None
                 }
                 AgentUpdate::TurnComplete { .. } => {
                     entry.turn_count += 1;
+                    None
                 }
-                _ => {}
+                _ => None,
             }
+        } else {
+            None
+        };
+
+        // Accumulate deltas into aggregate totals (borrow of entry is dropped above)
+        if let Some((input_delta, output_delta)) = token_delta {
+            state.agent_totals.add(&crate::domain::TokenUsage {
+                input_tokens: input_delta,
+                output_tokens: output_delta,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            });
         }
     }
 

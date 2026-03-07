@@ -60,6 +60,8 @@ pub struct RunningEntrySnapshot {
     pub last_event_message: Option<String>,
     /// When this entry was started
     pub started_at: DateTime<Utc>,
+    /// Elapsed wall-clock seconds since the entry started
+    pub seconds_running: f64,
 }
 
 /// Rate limit information
@@ -102,6 +104,7 @@ mod tests {
                 last_event: Some("result".to_string()),
                 last_event_message: Some("Done".to_string()),
                 started_at: Utc::now(),
+                seconds_running: 0.0,
             }],
             agent_totals: TokenTotals::new(),
             rate_limits: Some(RateLimitInfo {
