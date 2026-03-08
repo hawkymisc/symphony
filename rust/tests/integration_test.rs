@@ -5,6 +5,10 @@
 //!   MockAgentRunner (always succeeds)
 //!
 //! Verifies: open issue → dispatch → agent run → retry queue → issue polled again.
+//!
+//! Tests synchronise on actual state changes (polling loop with timeout) rather
+//! than fixed-duration sleeps so they do not produce intermittent failures on
+//! slow CI machines.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +21,7 @@ use symphony::agent::{AgentError, AgentRunner, AgentUpdate};
 use symphony::config::AppConfig;
 use symphony::domain::Issue;
 use symphony::orchestrator::{Orchestrator, OrchestratorMsg};
-use symphony::tracker::{MemoryTracker, Tracker};
+use symphony::tracker::MemoryTracker;
 
 // ---------------------------------------------------------------------------
 // Minimal mock agent runner
@@ -60,9 +64,29 @@ fn open_issue(id: &str, num: &str) -> Issue {
 
 fn test_config() -> AppConfig {
     let mut c = AppConfig::default();
-    c.polling.interval_ms = 30;   // fast poll for tests
+    c.polling.interval_ms = 30; // fast poll for tests
     c.agent.max_concurrent_agents = 5;
     c
+}
+
+/// Poll `check` every 10 ms until it returns `true` or `timeout` elapses.
+///
+/// Panics with `msg` if the deadline is reached.
+async fn wait_until<F, Fut>(timeout: Duration, msg: &str, mut check: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    tokio::time::timeout(timeout, async {
+        loop {
+            if check().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{}", msg));
 }
 
 // ---------------------------------------------------------------------------
@@ -73,8 +97,6 @@ fn test_config() -> AppConfig {
 /// 1. An open issue exists in the tracker
 /// 2. Orchestrator dispatches it to the agent
 /// 3. Agent completes successfully
-/// 4. Orchestrator moves the issue to the retry queue (1-second continuation delay)
-/// 5. The runtime snapshot reflects the completed dispatch
 #[tokio::test]
 async fn integration_full_cycle_dispatch_and_completion() {
     let issue = open_issue("GH_ISSUE_42", "42");
@@ -82,21 +104,17 @@ async fn integration_full_cycle_dispatch_and_completion() {
     let agent = SuccessAgent::new();
     let dispatched = Arc::clone(&agent.dispatched);
 
-    let (orchestrator, tx) = Orchestrator::new(tracker, agent, test_config());
+    let (orchestrator, _tx) = Orchestrator::new(tracker, agent, test_config());
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-
     tokio::spawn(async move { orchestrator.run(cancel_clone).await });
 
-    // Wait long enough for at least one poll+dispatch+agent-run cycle
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Issue was dispatched to the agent
-    let ids = dispatched.lock().await;
-    assert!(
-        ids.contains(&"GH_ISSUE_42".to_string()),
-        "issue GH_ISSUE_42 should have been dispatched; got: {:?}", *ids
-    );
+    // Wait until the issue is dispatched (no fixed sleep)
+    wait_until(Duration::from_secs(5), "issue GH_ISSUE_42 was not dispatched within 5 s", || {
+        let dispatched = Arc::clone(&dispatched);
+        async move { dispatched.lock().await.contains(&"GH_ISSUE_42".to_string()) }
+    })
+    .await;
 
     cancel.cancel();
 }
@@ -107,7 +125,7 @@ async fn integration_snapshot_shows_running_while_agent_active() {
     let issue = open_issue("GH_ISSUE_10", "10");
     let tracker = MemoryTracker::with_issues(vec![issue]);
 
-    // Use a slow agent so it's still running when we take the snapshot
+    // Slow agent: stays running until cancelled
     struct SlowAgent;
     #[async_trait]
     impl AgentRunner for SlowAgent {
@@ -119,10 +137,7 @@ async fn integration_snapshot_shows_running_while_agent_active() {
             _update_tx: mpsc::UnboundedSender<(String, AgentUpdate)>,
             cancel: CancellationToken,
         ) -> Result<(), AgentError> {
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(10)) => {}
-                _ = cancel.cancelled() => {}
-            }
+            cancel.cancelled().await;
             Ok(())
         }
     }
@@ -132,10 +147,23 @@ async fn integration_snapshot_shows_running_while_agent_active() {
     let cancel_clone = cancel.clone();
     tokio::spawn(async move { orchestrator.run(cancel_clone).await });
 
-    // Let the orchestrator dispatch the issue
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Wait until the orchestrator has at least one running entry
+    wait_until(Duration::from_secs(5), "no running agents observed within 5 s", || {
+        let tx = tx.clone();
+        async move {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx }).is_err() {
+                return false;
+            }
+            match tokio::time::timeout(Duration::from_millis(100), reply_rx).await {
+                Ok(Ok(snap)) => snap.running_count >= 1,
+                _ => false,
+            }
+        }
+    })
+    .await;
 
-    // Request a runtime snapshot
+    // Take a final snapshot and assert
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx }).unwrap();
     let snapshot = tokio::time::timeout(Duration::from_secs(1), reply_rx)
@@ -143,10 +171,7 @@ async fn integration_snapshot_shows_running_while_agent_active() {
         .expect("timed out")
         .expect("channel closed");
 
-    assert_eq!(
-        snapshot.running_count, 1,
-        "one issue should be running; snapshot: {:?}", snapshot.running_count
-    );
+    assert_eq!(snapshot.running_count, 1);
     assert_eq!(snapshot.running[0].identifier, "10");
 
     cancel.cancel();
@@ -169,13 +194,17 @@ async fn integration_full_cycle_multiple_issues_dispatched() {
     let cancel_clone = cancel.clone();
     tokio::spawn(async move { orchestrator.run(cancel_clone).await });
 
-    // Allow enough time for all 3 issues to be dispatched and completed
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
-    let ids = dispatched.lock().await;
-    assert!(ids.contains(&"GH_1".to_string()), "GH_1 should be dispatched");
-    assert!(ids.contains(&"GH_2".to_string()), "GH_2 should be dispatched");
-    assert!(ids.contains(&"GH_3".to_string()), "GH_3 should be dispatched");
+    // Wait until all 3 issues are dispatched
+    wait_until(Duration::from_secs(5), "not all 3 issues dispatched within 5 s", || {
+        let dispatched = Arc::clone(&dispatched);
+        async move {
+            let ids = dispatched.lock().await;
+            ids.contains(&"GH_1".to_string())
+                && ids.contains(&"GH_2".to_string())
+                && ids.contains(&"GH_3".to_string())
+        }
+    })
+    .await;
 
     cancel.cancel();
 }
@@ -186,7 +215,9 @@ async fn integration_closed_issue_never_dispatched() {
     let mut issue = Issue::new("GH_CLOSED", "99", "Closed issue");
     issue.state = "closed".to_string();
 
-    let tracker = MemoryTracker::with_issues(vec![issue]);
+    // Add one open issue so the orchestrator actually polls
+    let open = open_issue("GH_OPEN", "1");
+    let tracker = MemoryTracker::with_issues(vec![issue, open]);
     let agent = SuccessAgent::new();
     let dispatched = Arc::clone(&agent.dispatched);
 
@@ -195,13 +226,16 @@ async fn integration_closed_issue_never_dispatched() {
     let cancel_clone = cancel.clone();
     tokio::spawn(async move { orchestrator.run(cancel_clone).await });
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Wait until at least the open issue is dispatched (proves orchestrator polled)
+    wait_until(Duration::from_secs(5), "open issue GH_OPEN was not dispatched", || {
+        let dispatched = Arc::clone(&dispatched);
+        async move { dispatched.lock().await.contains(&"GH_OPEN".to_string()) }
+    })
+    .await;
 
+    // Now check that the closed issue was NOT dispatched
     let ids = dispatched.lock().await;
-    assert!(
-        !ids.contains(&"GH_CLOSED".to_string()),
-        "closed issue should NOT be dispatched"
-    );
+    assert!(!ids.contains(&"GH_CLOSED".to_string()), "closed issue must not be dispatched");
 
     cancel.cancel();
 }

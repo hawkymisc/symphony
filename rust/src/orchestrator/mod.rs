@@ -100,7 +100,20 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                 }
 
                 _ = interval.tick() => {
-                    self.handle_tick(&mut state).await;
+                    // Run the tick cancel-safe: if a shutdown arrives mid-poll
+                    // (e.g. while awaiting the GitHub network call), we abort
+                    // immediately rather than waiting for the 30 s HTTP timeout.
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            info!("Shutdown requested during tick");
+                            for (_, entry) in state.running.iter() {
+                                entry.cancel_token.cancel();
+                            }
+                            break;
+                        }
+                        _ = self.handle_tick(&mut state) => {}
+                    }
                 }
 
                 Some(msg) = self.rx.recv() => {
@@ -110,7 +123,17 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                             cancel.cancel();
                         }
                         OrchestratorMsg::Tick => {
-                            self.handle_tick(&mut state).await;
+                            // Also cancel-safe for message-triggered ticks
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    for (_, entry) in state.running.iter() {
+                                        entry.cancel_token.cancel();
+                                    }
+                                    break;
+                                }
+                                _ = self.handle_tick(&mut state) => {}
+                            }
                         }
                         OrchestratorMsg::WorkerFinished { issue_id, result } => {
                             self.handle_worker_finished(&mut state, issue_id, result).await;
