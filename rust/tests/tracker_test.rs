@@ -524,6 +524,23 @@ async fn fetch_issues_by_states_multiple_states() {
     assert!(states.contains(&"closed"), "should include closed issues");
 }
 
+/// fetch_issues_by_states with an empty slice returns Ok([]) without any HTTP request (spec §2).
+#[tokio::test]
+async fn fetch_issues_by_states_empty_slice_no_http_call() {
+    let server = MockServer::start().await;
+    // No mock registered: any HTTP request would return 404, causing a tracker error.
+
+    let tracker = GitHubTracker::new(make_config(&server.uri(), vec![])).unwrap();
+    let issues = tracker.fetch_issues_by_states(&[]).await.unwrap();
+
+    assert!(issues.is_empty(), "empty states slice must return empty vec");
+    // Verify no request was made to the server
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "no HTTP request should be issued for an empty states slice"
+    );
+}
+
 // ─── fetch_states_partial ────────────────────────────────────────────────────
 
 #[tokio::test]
