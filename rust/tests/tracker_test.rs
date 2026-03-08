@@ -1,6 +1,6 @@
 //! Phase 3: GitHub Tracker tests using wiremock (PLAN.md §Phase 3)
 
-use wiremock::matchers::{body_json_schema, header, method, path};
+use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use serde_json::json;
 
@@ -448,9 +448,11 @@ async fn fetch_issues_by_states_returns_matching_issues() {
 async fn fetch_issues_by_states_normalizes_lowercase_to_uppercase() {
     let server = MockServer::start().await;
 
-    // Respond with an OPEN issue — proves the request was sent correctly
+    // The mock requires the request body to contain "OPEN" (uppercased).
+    // If normalization is missing, the raw "open" would be sent and the mock would reject it.
     Mock::given(method("POST"))
         .and(path("/graphql"))
+        .and(body_string_contains("OPEN"))
         .respond_with(ResponseTemplate::new(200).set_body_json(single_issue_response()))
         .expect(1)
         .mount(&server)
@@ -460,7 +462,7 @@ async fn fetch_issues_by_states_normalizes_lowercase_to_uppercase() {
     // Pass lowercase "open" — should be normalized to "OPEN" in the GraphQL query
     let issues = tracker.fetch_issues_by_states(&["open".to_string()]).await.unwrap();
 
-    // We only verify the request was made (mock expect=1) and a result returned
+    // Verify the result: mock's expect(1) ensures the body-contains matcher matched
     assert_eq!(issues.len(), 1);
 }
 

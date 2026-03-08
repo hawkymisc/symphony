@@ -274,17 +274,39 @@ async fn integration_failure_retry_success_cycle() {
     })
     .await;
 
-    // After the successful (3rd) run, the issue should be in the retry queue
-    // with attempt=0 (the 1-second continuation timer hasn't fired yet).
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx }).unwrap();
-    let snapshot = tokio::time::timeout(Duration::from_secs(1), reply_rx)
-        .await
-        .expect("snapshot timed out")
-        .expect("channel closed");
+    // After the successful (3rd) run there is a 1-second re-dispatch window during which
+    // the issue sits in the retry queue with attempt=0 and error=None.
+    // Poll snapshots until we see that state (or time out).
+    let final_snap = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx }).unwrap();
+            let snap = tokio::time::timeout(Duration::from_millis(200), reply_rx)
+                .await
+                .expect("snapshot channel timed out")
+                .expect("channel closed");
 
-    // The issue should not be running (agent finished)
-    assert_eq!(snapshot.running_count, 0, "issue should not be running after success");
+            if snap.running_count == 0
+                && snap.retrying.iter().any(|e| e.attempt == 0 && e.error.is_none())
+            {
+                break snap;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("retry queue with attempt=0 not observed within 5 s; last snap: {:?}", snap);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+
+    // Agent should not still be running
+    assert_eq!(final_snap.running_count, 0, "issue should not be running after success");
+
+    // The retry entry must reflect the successful run: attempt=0, no error
+    assert_eq!(final_snap.retrying_count, 1, "exactly one retry entry expected");
+    let entry = &final_snap.retrying[0];
+    assert_eq!(entry.attempt, 0, "successful run resets consecutive failure counter to 0");
+    assert!(entry.error.is_none(), "successful run must not carry an error");
 
     cancel.cancel();
 }
