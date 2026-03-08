@@ -166,7 +166,7 @@ Prompt template here. Available variables:
 | Feature | Notes |
 |---|---|
 | GitHub Issues polling | GraphQL v4, pagination, label filtering |
-| Issue dispatch | Priority sort, concurrency limit, claim deduplication |
+| Issue dispatch | FIFO-by-created_at (priority field is always null for GitHub Issues), concurrency limit, claim deduplication |
 | Claude Code CLI integration | Subprocess, streaming JSON events, token tracking |
 | Workspace management | Per-issue directories, hook scripts (after_create / before_run / after_run) |
 | Retry with exponential backoff | Configurable cap, consecutive failure tracking |
@@ -190,6 +190,8 @@ Prompt template here. Available variables:
 | Rate limit auto-pause | GitHub rate limit headers are tracked but don't auto-pause polling |
 | Workspace cleanup (`before_remove` hook) | `cleanup_workspace` is not called from the orchestrator; before_remove hook never fires |
 | Cache token aggregation | Claude CLI reports cache tokens but they are not forwarded to the runtime aggregator |
+| Completed issue count | `OrchestratorState.completed` is never populated; `completed_count` in snapshots/dashboard is always 0 |
+| Priority-based dispatch | GitHub Issues have no native priority field; dispatch always falls back to oldest-first (created_at) |
 
 ---
 
