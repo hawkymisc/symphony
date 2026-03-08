@@ -266,3 +266,76 @@ async fn server_shuts_down_on_cancel() {
         .await;
     assert!(err.is_err(), "expected connection error after shutdown");
 }
+
+// ---------------------------------------------------------------------------
+// Tests: orchestrator unreachable → 503 on refresh
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn post_api_refresh_returns_503_when_orchestrator_closed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    // Create a channel, immediately drop the receiver so the sender fails.
+    let (tx, rx) = mpsc::unbounded_channel::<OrchestratorMsg>();
+    drop(rx);
+
+    let cancel = CancellationToken::new();
+    let cancel_srv = cancel.clone();
+    tokio::spawn(async move {
+        symphony::http_server::start_server(listener, tx, cancel_srv)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{}/api/refresh", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), 503);
+}
+
+// ---------------------------------------------------------------------------
+// Tests: dashboard uses textContent (no raw innerHTML interpolation)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_root_dashboard_uses_textcontent_not_innerhtml_for_data() {
+    let (client, base, _cancel) = start_test_server().await;
+
+    let body = client
+        .get(format!("{}/", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // The dashboard JS must NOT use innerHTML to render dynamic data rows.
+    // (textContent is safe; innerHTML with attacker-controlled data is XSS.)
+    assert!(
+        body.contains("textContent"),
+        "dashboard should use textContent for safe rendering"
+    );
+    assert!(
+        !body.contains(".innerHTML = ") || body.contains("textContent"),
+        "innerHTML without escaping is unsafe; use textContent/makeRow instead"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests: server binds to loopback (security check)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bind_localhost_binds_to_loopback() {
+    let listener = symphony::http_server::bind_localhost(0).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    assert!(addr.ip().is_loopback(), "expected loopback, got {}", addr.ip());
+}

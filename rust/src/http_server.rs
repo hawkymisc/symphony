@@ -5,13 +5,17 @@
 //!   GET  /            — HTML dashboard (auto-refreshing)
 //!   GET  /api/status  — JSON RuntimeSnapshot
 //!   POST /api/refresh — trigger immediate orchestrator poll
+//!
+//! Security note: the server binds to 127.0.0.1 (loopback only).
+//! There is no authentication; do not expose this port externally.
 
 #[cfg(feature = "http-server")]
-pub use server::start_server;
+pub use server::{start_server, bind_localhost};
 
 #[cfg(feature = "http-server")]
 mod server {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use axum::{
         Router,
@@ -28,6 +32,9 @@ mod server {
     use crate::observability::RuntimeSnapshot;
     use crate::orchestrator::OrchestratorMsg;
 
+    /// Timeout for waiting on orchestrator responses (prevents hanging workers).
+    const ORCHESTRATOR_TIMEOUT: Duration = Duration::from_secs(5);
+
     #[derive(Clone)]
     struct AppState {
         tx: mpsc::UnboundedSender<OrchestratorMsg>,
@@ -35,6 +42,8 @@ mod server {
 
     /// Start the HTTP server on the given listener.
     ///
+    /// The listener should be bound to `127.0.0.1` (loopback) — see
+    /// [`bind_localhost`] for a helper that enforces this.
     /// Shuts down gracefully when `cancel` is fired.
     pub async fn start_server(
         listener: TcpListener,
@@ -54,25 +63,31 @@ mod server {
             .await
     }
 
+    /// Bind to localhost on `port` (127.0.0.1, not 0.0.0.0).
+    pub async fn bind_localhost(port: u16) -> std::io::Result<TcpListener> {
+        TcpListener::bind(format!("127.0.0.1:{port}")).await
+    }
+
     async fn get_dashboard() -> Html<&'static str> {
         Html(DASHBOARD_HTML)
     }
 
-    async fn get_status(
-        State(state): State<Arc<AppState>>,
-    ) -> impl IntoResponse {
+    async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         if state
             .tx
             .send(OrchestratorMsg::SnapshotRequest { reply: reply_tx })
-            .is_ok()
+            .is_err()
         {
-            if let Ok(snapshot) = reply_rx.await {
-                return (StatusCode::OK, Json(snapshot)).into_response();
-            }
+            // Orchestrator channel closed — return empty snapshot
+            return (StatusCode::OK, Json(RuntimeSnapshot::default())).into_response();
         }
-        // Orchestrator unreachable — return empty snapshot
-        (StatusCode::OK, Json(RuntimeSnapshot::default())).into_response()
+
+        match tokio::time::timeout(ORCHESTRATOR_TIMEOUT, reply_rx).await {
+            Ok(Ok(snapshot)) => (StatusCode::OK, Json(snapshot)).into_response(),
+            // Timeout or channel dropped
+            _ => (StatusCode::OK, Json(RuntimeSnapshot::default())).into_response(),
+        }
     }
 
     async fn post_refresh(State(state): State<Arc<AppState>>) -> StatusCode {
@@ -80,15 +95,19 @@ mod server {
         if state
             .tx
             .send(OrchestratorMsg::RefreshRequest { reply: reply_tx })
-            .is_ok()
+            .is_err()
         {
-            let _ = reply_rx.await;
-            StatusCode::OK
-        } else {
-            StatusCode::SERVICE_UNAVAILABLE
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+
+        match tokio::time::timeout(ORCHESTRATOR_TIMEOUT, reply_rx).await {
+            Ok(Ok(())) => StatusCode::OK,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
+    // Dashboard HTML — uses only DOM textContent/createElement, never innerHTML,
+    // to prevent XSS from attacker-controlled field values (issue titles, errors).
     const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -124,33 +143,53 @@ mod server {
   <div class="card">
     <div class="label">Running agents</div>
     <table>
-      <thead><tr><th>#</th><th>Title</th><th>Turns</th><th>Tokens</th><th>Running</th></tr></thead>
+      <thead><tr><th>#</th><th>Issue ID</th><th>Turns</th><th>Tokens</th><th>Running</th></tr></thead>
       <tbody id="running-table"></tbody>
     </table>
   </div>
   <div class="card">
     <div class="label">Retry queue</div>
     <table>
-      <thead><tr><th>#</th><th>Attempt</th><th>Error</th></tr></thead>
+      <thead><tr><th>Issue ID</th><th>Attempt</th><th>Error</th></tr></thead>
       <tbody id="retry-table"></tbody>
     </table>
   </div>
   <script>
+    // Safe helper: creates a <tr> with text-only <td> cells (no innerHTML).
+    function makeRow(cells) {
+      const tr = document.createElement('tr');
+      cells.forEach(function(text) {
+        const td = document.createElement('td');
+        td.textContent = String(text == null ? '' : text);
+        tr.appendChild(td);
+      });
+      return tr;
+    }
+
     async function load() {
       const res = await fetch('/api/status');
       const d = await res.json();
       document.getElementById('running').textContent   = d.running_count;
       document.getElementById('retrying').textContent  = d.retrying_count;
       document.getElementById('completed').textContent = d.completed_count;
-      document.getElementById('ts').textContent        = ' — ' + new Date(d.generated_at).toLocaleTimeString();
-      document.getElementById('running-table').innerHTML = (d.running || []).map(e =>
-        `<tr><td>${e.identifier}</td><td>${e.issue_id}</td><td>${e.turn_count}</td>` +
-        `<td>${e.total_tokens}</td><td>${Math.round(e.seconds_running)}s</td></tr>`
-      ).join('');
-      document.getElementById('retry-table').innerHTML = (d.retrying || []).map(e =>
-        `<tr><td>${e.issue_id}</td><td>${e.attempt}</td><td>${e.error || ''}</td></tr>`
-      ).join('');
+      document.getElementById('ts').textContent = ' — ' + new Date(d.generated_at).toLocaleTimeString();
+
+      const runTbody = document.getElementById('running-table');
+      runTbody.textContent = '';
+      (d.running || []).forEach(function(e) {
+        runTbody.appendChild(makeRow([
+          e.identifier, e.issue_id, e.turn_count,
+          e.total_tokens, Math.round(e.seconds_running) + 's'
+        ]));
+      });
+
+      const retryTbody = document.getElementById('retry-table');
+      retryTbody.textContent = '';
+      (d.retrying || []).forEach(function(e) {
+        retryTbody.appendChild(makeRow([e.issue_id, e.attempt, e.error]));
+      });
     }
+
     load();
     setInterval(load, 5000);
   </script>
