@@ -23,7 +23,7 @@ use crate::domain::{Issue, RetryEntry};
 use crate::tracker::Tracker;
 use crate::agent::{AgentRunner, AgentUpdate};
 use crate::observability::RuntimeSnapshot;
-use crate::workspace::{prepare_workspace, run_before_run_hook, run_after_run_hook};
+use crate::workspace::{prepare_workspace, run_before_run_hook, run_after_run_hook, cleanup_workspace};
 
 /// Messages sent to the orchestrator
 #[derive(Debug)]
@@ -53,6 +53,11 @@ pub enum OrchestratorMsg {
     /// Request refresh
     RefreshRequest {
         reply: tokio::sync::oneshot::Sender<()>,
+    },
+    /// Workspace was prepared for an issue (path ready for tracking)
+    WorkspaceReady {
+        issue_id: String,
+        path: std::path::PathBuf,
     },
     /// Shutdown requested
     Shutdown,
@@ -138,6 +143,11 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                         }
                         OrchestratorMsg::WorkerFinished { issue_id, result } => {
                             self.handle_worker_finished(&mut state, issue_id, result).await;
+                        }
+                        OrchestratorMsg::WorkspaceReady { issue_id, path } => {
+                            if let Some(entry) = state.running.get_mut(&issue_id) {
+                                entry.workspace_path = Some(path);
+                            }
                         }
                         OrchestratorMsg::AgentUpdate { issue_id, update } => {
                             self.handle_agent_update(&mut state, issue_id, update);
@@ -248,7 +258,14 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
         let task_handle = tokio::spawn(async move {
             // Prepare workspace (creates dir + runs after_create hook on first use)
             let workspace_path = match prepare_workspace(&config.workspace, &hooks, &issue_clone).await {
-                Ok(p) => p.path,
+                Ok(p) => {
+                    // Notify the orchestrator of the workspace path so it can be tracked for cleanup
+                    let _ = tx_finish.send(OrchestratorMsg::WorkspaceReady {
+                        issue_id: issue_clone.id.clone(),
+                        path: p.path.clone(),
+                    });
+                    p.path
+                }
                 Err(e) => {
                     warn!("prepare_workspace failed for issue {}: {}", issue_clone.identifier, e);
                     let _ = tx_finish.send(OrchestratorMsg::WorkerFinished {
@@ -303,6 +320,7 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
     ) {
         if let Some(entry) = state.running.remove(&issue_id) {
             let identifier = entry.identifier.clone();
+            let workspace_path = entry.workspace_path.clone();
             let elapsed_secs = (chrono::Utc::now() - entry.started_at).num_milliseconds().max(0) as u64 / 1000;
             state.agent_totals.add_seconds(elapsed_secs);
 
@@ -326,6 +344,7 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                         timer_handle,
                         identifier: Some(identifier),
                         error: None,
+                        workspace_path,
                     });
                 }
                 Err(e) => {
@@ -354,6 +373,7 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                         timer_handle,
                         identifier: Some(identifier),
                         error: Some(e.to_string()),
+                        workspace_path,
                     });
                 }
             }
@@ -404,20 +424,24 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
         // Remove from retry queue and capture prior failure count before dispatch
         if let Some(removed_entry) = state.retry_attempts.remove(&issue_id) {
             let prior_failures = if removed_entry.error.is_some() { removed_entry.attempt } else { 0 };
+            let workspace_path = removed_entry.workspace_path.clone();
 
             // Re-fetch issue and dispatch if still active
             match self.tracker.fetch_issues_by_ids(&[issue_id.clone()]).await {
                 Ok(issues) => {
-                    if let Some(issue) = issues.into_iter().next() {
-                        if issue.is_active() && state.running.len() < state.max_concurrent_agents {
-                            self.dispatch_issue(state, issue, prior_failures).await;
-                        } else {
-                            // Issue no longer active or no slots
-                            state.claimed.remove(&issue_id);
-                        }
+                    let redispatch = issues.into_iter().next()
+                        .filter(|i| i.is_active() && state.running.len() < state.max_concurrent_agents);
+
+                    if let Some(issue) = redispatch {
+                        self.dispatch_issue(state, issue, prior_failures).await;
                     } else {
-                        // Issue not found
+                        // Issue not found, no longer active, or no slots — abandon and clean up
                         state.claimed.remove(&issue_id);
+                        if let Some(path) = workspace_path {
+                            if let Err(e) = cleanup_workspace(&path, &self.config.hooks).await {
+                                warn!(issue_id = %issue_id, error = %e, "cleanup_workspace failed (non-fatal)");
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -441,6 +465,7 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                         timer_handle,
                         identifier: None,
                         error: Some(e.to_string()),
+                        workspace_path,
                     });
                 }
             }

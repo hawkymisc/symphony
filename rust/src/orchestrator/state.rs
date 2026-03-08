@@ -1,6 +1,7 @@
 //! Orchestrator state management
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +49,8 @@ pub struct RunningEntry {
     pub consecutive_failures: u32,
     /// When this entry was started
     pub started_at: DateTime<Utc>,
+    /// Workspace path for this issue (set after WorkspaceReady message, used for cleanup)
+    pub workspace_path: Option<PathBuf>,
 }
 
 impl Default for RunningEntry {
@@ -71,6 +74,7 @@ impl Default for RunningEntry {
             turn_count: 0,
             consecutive_failures: 0,
             started_at: Utc::now(),
+            workspace_path: None,
         }
     }
 }

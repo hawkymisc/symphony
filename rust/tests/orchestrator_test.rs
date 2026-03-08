@@ -564,6 +564,145 @@ async fn worker_finished_failure_increments_attempt_count() {
     cancel.cancel();
 }
 
+// ─── workspace cleanup tests ──────────────────────────────────────────────────
+
+/// Tracker that returns issues normally on fetch_candidate_issues, but returns
+/// them as closed on fetch_issues_by_ids (simulates issue closing between runs).
+struct IssueClosedOnRetryTracker {
+    inner: MemoryTracker,
+}
+
+impl IssueClosedOnRetryTracker {
+    fn with_issues(issues: Vec<Issue>) -> Self {
+        Self { inner: MemoryTracker::with_issues(issues) }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tracker for IssueClosedOnRetryTracker {
+    async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+        self.inner.fetch_candidate_issues().await
+    }
+
+    async fn fetch_issues_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, TrackerError> {
+        // Return the issues as closed so handle_retry thinks they are inactive
+        let mut issues = self.inner.fetch_issues_by_ids(ids).await?;
+        for issue in &mut issues {
+            issue.state = "closed".to_string();
+        }
+        Ok(issues)
+    }
+
+    async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, TrackerError> {
+        self.inner.fetch_issues_by_states(states).await
+    }
+}
+
+/// When handle_retry finds the issue is no longer active (closed), cleanup_workspace
+/// should be called. Verified by a before_remove hook creating a flag file.
+#[tokio::test]
+async fn cleanup_workspace_called_when_issue_closed_on_retry() {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let flag_file = temp_dir.path().join("before_remove_ran");
+
+    let tracker = IssueClosedOnRetryTracker::with_issues(vec![make_open_issue("I_1", "TEST-1")]);
+    let agent = MockAgentRunner::success();
+
+    let mut config = make_config(5);
+    config.polling.interval_ms = 50;
+    // Short backoff so retry fires quickly
+    config.agent.max_retry_backoff_ms = 100;
+    config.workspace.root = workspace_root.clone();
+    config.hooks.before_remove = Some(format!("touch {}", flag_file.display()));
+
+    let (orchestrator, tx) = Orchestrator::new(tracker, agent, config);
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
+    tokio::spawn(async move {
+        orchestrator.run(cancel_clone).await;
+    });
+
+    // Wait for the before_remove flag file to appear (created by cleanup_workspace)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if flag_file.exists() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Timed out waiting for before_remove hook to run"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Also verify the workspace directory itself was removed
+    let workspace_dir = workspace_root.join("TEST-1");
+    assert!(!workspace_dir.exists(), "Workspace directory should be removed after cleanup");
+
+    cancel.cancel();
+}
+
+/// When handle_retry gets an empty result (issue not found in tracker), cleanup_workspace
+/// should also be called.
+#[tokio::test]
+async fn cleanup_workspace_called_when_issue_not_found_on_retry() {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let flag_file = temp_dir.path().join("before_remove_ran2");
+
+    struct IssueNotFoundOnRetryTracker {
+        inner: MemoryTracker,
+    }
+
+    #[async_trait::async_trait]
+    impl Tracker for IssueNotFoundOnRetryTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            self.inner.fetch_candidate_issues().await
+        }
+
+        async fn fetch_issues_by_ids(&self, _ids: &[String]) -> Result<Vec<Issue>, TrackerError> {
+            Ok(vec![]) // issue not found
+        }
+
+        async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, TrackerError> {
+            self.inner.fetch_issues_by_states(states).await
+        }
+    }
+
+    let tracker = IssueNotFoundOnRetryTracker { inner: MemoryTracker::with_issues(vec![make_open_issue("I_2", "TEST-2")]) };
+    let agent = MockAgentRunner::success();
+
+    let mut config = make_config(5);
+    config.polling.interval_ms = 50;
+    config.agent.max_retry_backoff_ms = 100;
+    config.workspace.root = workspace_root.clone();
+    config.hooks.before_remove = Some(format!("touch {}", flag_file.display()));
+
+    let (orchestrator, tx) = Orchestrator::new(tracker, agent, config);
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
+    tokio::spawn(async move {
+        orchestrator.run(cancel_clone).await;
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if flag_file.exists() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Timed out waiting for before_remove hook to run (issue not found case)"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    cancel.cancel();
+}
+
 /// Requesting a snapshot from a running orchestrator returns a valid snapshot.
 #[tokio::test]
 async fn snapshot_returns_valid_data() {
