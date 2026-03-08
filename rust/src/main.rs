@@ -147,7 +147,37 @@ async fn main() {
     });
 
     // Build and run orchestrator
-    let (orchestrator, _tx) = Orchestrator::new(tracker, agent_runner, config);
+    let (orchestrator, tx) = Orchestrator::new(tracker, agent_runner, config);
+
+    // Warn when --port is supplied but http-server feature is not compiled in.
+    #[cfg(not(feature = "http-server"))]
+    if args.port.is_some() {
+        error!(
+            "--port requires the http-server feature; \
+             recompile with `--features http-server` (ignoring)"
+        );
+    }
+
+    // Start optional HTTP server (localhost only — no external access).
+    #[cfg(feature = "http-server")]
+    if let Some(port) = args.port {
+        let tx_http = tx.clone();
+        let cancel_http = cancel.clone();
+        let listener = match symphony::http_server::bind_localhost(port).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Failed to bind HTTP server on 127.0.0.1:{}: {}", port, e);
+                std::process::exit(exit_codes::CONFIG_ERROR);
+            }
+        };
+        info!("HTTP server listening on 127.0.0.1:{}", port);
+        tokio::spawn(async move {
+            if let Err(e) = symphony::http_server::start_server(listener, tx_http, cancel_http).await {
+                tracing::warn!("HTTP server error: {}", e);
+            }
+        });
+    }
+
     orchestrator.run(cancel).await;
 
     info!("Symphony stopped");
