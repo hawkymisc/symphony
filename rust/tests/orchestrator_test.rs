@@ -14,6 +14,8 @@ use symphony::domain::Issue;
 use symphony::orchestrator::{Orchestrator, OrchestratorMsg};
 use symphony::tracker::{MemoryTracker, Tracker, TrackerError};
 
+mod common;
+
 // ─── MockAgentRunner ──────────────────────────────────────────────────────────
 
 /// Records which issue IDs were dispatched to it.
@@ -78,17 +80,11 @@ impl AgentRunner for MockAgentRunner {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn make_config(max_concurrent: usize) -> AppConfig {
-    let mut config = AppConfig::default();
-    config.agent.max_concurrent_agents = max_concurrent;
-    // Very short poll so tests don't wait long
-    config.polling.interval_ms = 50;
-    config
+    common::make_app_config_with_concurrency(max_concurrent)
 }
 
 fn make_open_issue(id: &str, identifier: &str) -> Issue {
-    let mut issue = Issue::new(id, identifier, "Test issue");
-    issue.state = "open".to_string();
-    issue
+    common::make_open_issue(id, identifier)
 }
 
 /// Run the orchestrator in background, fire one tick, then shut it down.
