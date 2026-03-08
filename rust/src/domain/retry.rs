@@ -1,8 +1,8 @@
 //! Retry queue entry (SPEC §4.1.7)
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// Entry in the retry queue
@@ -18,6 +18,8 @@ pub struct RetryEntry {
     pub identifier: Option<String>,
     /// Error that caused the retry (for logging)
     pub error: Option<String>,
+    /// Workspace path for this issue (used for cleanup when issue is abandoned)
+    pub workspace_path: Option<PathBuf>,
 }
 
 impl RetryEntry {
@@ -73,6 +75,7 @@ mod tests {
                 timer_handle: handle,
                 identifier: Some("42".to_string()),
                 error: None,
+                workspace_path: None,
             };
             assert!(past_entry.is_due());
 
@@ -83,6 +86,7 @@ mod tests {
                 timer_handle: handle2,
                 identifier: Some("42".to_string()),
                 error: None,
+                workspace_path: None,
             };
             assert!(!future_entry.is_due());
         });
@@ -100,6 +104,7 @@ mod tests {
                 timer_handle: handle,
                 identifier: Some("42".to_string()),
                 error: Some("timeout".to_string()),
+                workspace_path: None,
             };
 
             let snapshot = entry.to_snapshot();
