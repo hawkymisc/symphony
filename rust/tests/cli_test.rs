@@ -161,6 +161,23 @@ fn cli_dry_run_invalid_config_exits_2() {
 // cli_graceful_shutdown  (UNIX only — requires SIGTERM)
 // ---------------------------------------------------------------------------
 
+/// Hermetic WORKFLOW.md for the shutdown test.
+///
+/// Points the tracker endpoint at 127.0.0.1:1 (port 1 is almost always
+/// closed → instant "connection refused" with no real network traffic).
+/// This keeps the test self-contained and avoids hitting api.github.com.
+/// The orchestrator's cancel-safe select! aborts the connection attempt
+/// immediately when SIGTERM fires, so the process exits in < 1 s.
+const SHUTDOWN_WORKFLOW: &str = r#"---
+tracker:
+  kind: github
+  repo: "test/repo"
+  api_key: "ghp_test_token_12345"
+  endpoint: "http://127.0.0.1:1/graphql"
+---
+Test prompt
+"#;
+
 /// SIGTERM causes the binary to exit cleanly with exit code 0.
 #[cfg(unix)]
 #[test]
@@ -169,10 +186,9 @@ fn cli_graceful_shutdown_on_sigterm() {
 
     let dir = TempDir::new().unwrap();
     let workflow = dir.path().join("WORKFLOW.md");
-    std::fs::write(&workflow, MINIMAL_WORKFLOW).unwrap();
+    // Use the hermetic workflow so the process never contacts api.github.com.
+    std::fs::write(&workflow, SHUTDOWN_WORKFLOW).unwrap();
 
-    // Start symphony in the background; it will try to poll GitHub (and fail quickly)
-    // but the point is to verify SIGTERM → exit 0 before any real network call.
     let mut child = std::process::Command::new(
         assert_cmd::cargo::cargo_bin("symphony"),
     )
@@ -182,7 +198,7 @@ fn cli_graceful_shutdown_on_sigterm() {
     .spawn()
     .unwrap();
 
-    // Give the process a moment to start up
+    // Give the process a moment to initialise
     std::thread::sleep(Duration::from_millis(300));
 
     // Send SIGTERM
