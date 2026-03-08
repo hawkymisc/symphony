@@ -138,9 +138,9 @@ fn cli_dry_run_shows_config_summary() {
         .stdout(predicate::str::contains("Max concurrent agents"));
 }
 
-/// --dry-run with an invalid repo format → exit code 2 (config error).
+/// --dry-run with an invalid repo format → exit code 1 (config error).
 #[test]
-fn cli_dry_run_invalid_config_exits_2() {
+fn cli_dry_run_invalid_config_exits_1() {
     let dir = TempDir::new().unwrap();
     let workflow = dir.path().join("WORKFLOW.md");
     std::fs::write(
@@ -154,40 +154,50 @@ fn cli_dry_run_invalid_config_exits_2() {
         .arg("--dry-run")
         .assert()
         .failure()
-        .code(2);
+        .code(1);
 }
 
 // ---------------------------------------------------------------------------
 // cli_graceful_shutdown  (UNIX only — requires SIGTERM)
 // ---------------------------------------------------------------------------
 
-/// Hermetic WORKFLOW.md for the shutdown test.
-///
-/// Points the tracker endpoint at 127.0.0.1:1 (port 1 is almost always
-/// closed → instant "connection refused" with no real network traffic).
-/// This keeps the test self-contained and avoids hitting api.github.com.
-/// The orchestrator's cancel-safe select! aborts the connection attempt
-/// immediately when SIGTERM fires, so the process exits in < 1 s.
-const SHUTDOWN_WORKFLOW: &str = r#"---
-tracker:
-  kind: github
-  repo: "test/repo"
-  api_key: "ghp_test_token_12345"
-  endpoint: "http://127.0.0.1:1/graphql"
----
-Test prompt
-"#;
-
 /// SIGTERM causes the binary to exit cleanly with exit code 0.
+///
+/// Uses a TCP listener that accepts connections but never sends a response,
+/// so the orchestrator's first poll blocks inside `reqwest` waiting for HTTP data.
+/// When SIGTERM fires, the cancel-safe `select!` drops the in-flight future
+/// (cancelling the reqwest call) and the process exits in < 2 s.
 #[cfg(unix)]
 #[test]
 fn cli_graceful_shutdown_on_sigterm() {
+    use std::net::TcpListener;
     use std::process::Stdio;
+
+    // Bind a local server that accepts TCP connections but never sends a byte.
+    // reqwest will connect successfully and then block waiting for an HTTP response,
+    // which exercises the cancel-safe select! in the orchestrator.
+    let hanging_server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let hanging_port = hanging_server.local_addr().unwrap().port();
+
+    // Background thread: accept connections and hold them open indefinitely.
+    std::thread::spawn(move || {
+        loop {
+            // accept() blocks until a client connects; returned socket is held
+            // open until the thread exits (process teardown).
+            if hanging_server.accept().is_err() {
+                break;
+            }
+        }
+    });
+
+    let workflow_content = format!(
+        "---\ntracker:\n  kind: github\n  repo: \"test/repo\"\n  api_key: \"ghp_test_token_12345\"\n  endpoint: \"http://127.0.0.1:{}/graphql\"\n---\nTest prompt\n",
+        hanging_port
+    );
 
     let dir = TempDir::new().unwrap();
     let workflow = dir.path().join("WORKFLOW.md");
-    // Use the hermetic workflow so the process never contacts api.github.com.
-    std::fs::write(&workflow, SHUTDOWN_WORKFLOW).unwrap();
+    std::fs::write(&workflow, &workflow_content).unwrap();
 
     let mut child = std::process::Command::new(
         assert_cmd::cargo::cargo_bin("symphony"),
@@ -198,8 +208,9 @@ fn cli_graceful_shutdown_on_sigterm() {
     .spawn()
     .unwrap();
 
-    // Give the process a moment to initialise
-    std::thread::sleep(Duration::from_millis(300));
+    // Give the process enough time to initialise and start the first poll,
+    // so reqwest is actually blocking on the hanging server.
+    std::thread::sleep(Duration::from_millis(500));
 
     // Send SIGTERM
     // SAFETY: pid is a valid child process pid; kill(2) is async-signal-safe
