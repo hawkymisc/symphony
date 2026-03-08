@@ -119,6 +119,50 @@ async fn integration_full_cycle_dispatch_and_completion() {
     cancel.cancel();
 }
 
+/// Successful agent run increments completed_count in the snapshot.
+///
+/// After the agent finishes (Ok), completed_count must be 1 and the issue_id
+/// must appear in the completed set.
+#[tokio::test]
+async fn integration_completed_count_increments_on_success() {
+    let issue = open_issue("GH_DONE", "77");
+    let tracker = MemoryTracker::with_issues(vec![issue]);
+    let agent = SuccessAgent::new();
+
+    let (orchestrator, tx) = Orchestrator::new(tracker, agent, test_config());
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move { orchestrator.run(cancel_clone).await });
+
+    // Poll until completed_count == 1
+    wait_until(Duration::from_secs(5), "completed_count did not reach 1 within 5 s", || {
+        let tx = tx.clone();
+        async move {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx }).is_err() {
+                return false;
+            }
+            match tokio::time::timeout(Duration::from_millis(100), reply_rx).await {
+                Ok(Ok(snap)) => snap.completed_count == 1,
+                _ => false,
+            }
+        }
+    })
+    .await;
+
+    // Take a final snapshot and assert exact count (completed is a HashSet so no duplicates)
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx }).unwrap();
+    let snap = tokio::time::timeout(Duration::from_secs(1), reply_rx)
+        .await
+        .expect("timed out")
+        .expect("channel closed");
+
+    assert_eq!(snap.completed_count, 1, "exactly one issue should be completed");
+
+    cancel.cancel();
+}
+
 /// Snapshot after dispatch shows running_count > 0 while agent is in flight.
 #[tokio::test]
 async fn integration_snapshot_shows_running_while_agent_active() {

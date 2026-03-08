@@ -309,6 +309,8 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
             match result {
                 Ok(()) => {
                     info!(issue_id = %issue_id, identifier = %identifier, "Worker finished successfully");
+                    // Record this issue as having had at least one successful turn.
+                    state.completed.insert(issue_id.clone());
                     // Normal exit -> 1s continuation delay. Reset consecutive failure count.
                     let tx = self.tx.clone();
                     let id = issue_id.clone();
