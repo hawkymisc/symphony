@@ -145,7 +145,7 @@ hooks:
   after_create:  "./scripts/setup.sh"    # runs once when workspace is first created
   before_run:    "./scripts/prepare.sh"  # runs before each agent invocation (fatal on failure)
   after_run:     "./scripts/cleanup.sh"  # runs after each agent invocation (non-fatal)
-  before_remove: "./scripts/teardown.sh" # runs before workspace directory is deleted (non-fatal)
+  # before_remove is defined in config but not yet wired up in the orchestrator
   timeout_ms: 60000                      # default: 60 s; applies to all hooks
 ---
 Prompt template here. Available variables:
@@ -168,14 +168,14 @@ Prompt template here. Available variables:
 | GitHub Issues polling | GraphQL v4, pagination, label filtering |
 | Issue dispatch | Priority sort, concurrency limit, claim deduplication |
 | Claude Code CLI integration | Subprocess, streaming JSON events, token tracking |
-| Workspace management | Per-issue directories, hook scripts (after_create / before_run / after_run / before_remove) |
+| Workspace management | Per-issue directories, hook scripts (after_create / before_run / after_run) |
 | Retry with exponential backoff | Configurable cap, consecutive failure tracking |
 | Graceful shutdown | SIGTERM / SIGINT → cancel-safe exit |
 | Dry-run mode | `--dry-run` validates config and exits |
 | Observability snapshot | `RuntimeSnapshot` via internal message channel |
 | HTTP dashboard | Feature-gated (`--features http-server`); `GET /`, `GET /api/status`, `POST /api/refresh` |
 | Structured logging | `tracing` (human-readable by default); issue_id + identifier in every span |
-| Token aggregation | Input / output / cache tokens tracked across all sessions |
+| Token aggregation | Input / output tokens tracked across all sessions |
 
 ### 🔲 Not Yet Implemented
 
@@ -188,6 +188,8 @@ Prompt template here. Available variables:
 | Config hot-reload | `ConfigReloaded` message exists but doesn't re-parse WORKFLOW.md |
 | Per-state concurrency limits | Global limit only; no per-label / per-project slot control |
 | Rate limit auto-pause | GitHub rate limit headers are tracked but don't auto-pause polling |
+| Workspace cleanup (`before_remove` hook) | `cleanup_workspace` is not called from the orchestrator; before_remove hook never fires |
+| Cache token aggregation | Claude CLI reports cache tokens but they are not forwarded to the runtime aggregator |
 
 ---
 
