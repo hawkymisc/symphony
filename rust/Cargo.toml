@@ -47,6 +47,7 @@ async-trait = "0.1"
 # Cancellation tokens (already in tokio-util)
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }  # adds time control (pause/advance)
 tempfile = "3"
 wiremock = "0.6"
 assert_cmd = "2"

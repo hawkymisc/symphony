@@ -79,14 +79,14 @@ mod server {
             .send(OrchestratorMsg::SnapshotRequest { reply: reply_tx })
             .is_err()
         {
-            // Orchestrator channel closed — return empty snapshot
-            return (StatusCode::OK, Json(RuntimeSnapshot::default())).into_response();
+            // Orchestrator channel closed
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
 
         match tokio::time::timeout(ORCHESTRATOR_TIMEOUT, reply_rx).await {
             Ok(Ok(snapshot)) => (StatusCode::OK, Json(snapshot)).into_response(),
-            // Timeout or channel dropped
-            _ => (StatusCode::OK, Json(RuntimeSnapshot::default())).into_response(),
+            // Timeout or orchestrator dropped the sender
+            _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
     }
 
@@ -168,6 +168,10 @@ mod server {
 
     async function load() {
       const res = await fetch('/api/status');
+      if (!res.ok) {
+        document.getElementById('ts').textContent = ' — orchestrator unavailable (503)';
+        return;
+      }
       const d = await res.json();
       document.getElementById('running').textContent   = d.running_count;
       document.getElementById('retrying').textContent  = d.retrying_count;

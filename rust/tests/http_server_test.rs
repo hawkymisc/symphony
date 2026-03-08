@@ -317,16 +317,102 @@ async fn get_root_dashboard_uses_textcontent_not_innerhtml_for_data() {
         .await
         .unwrap();
 
-    // The dashboard JS must NOT use innerHTML to render dynamic data rows.
-    // (textContent is safe; innerHTML with attacker-controlled data is XSS.)
+    // Must use textContent for XSS-safe rendering
     assert!(
         body.contains("textContent"),
         "dashboard should use textContent for safe rendering"
     );
+
+    // Must NOT use .innerHTML to inject dynamic/attacker-controlled values.
+    // This assertion directly checks absence of the unsafe pattern.
     assert!(
-        !body.contains(".innerHTML = ") || body.contains("textContent"),
-        "innerHTML without escaping is unsafe; use textContent/makeRow instead"
+        !body.contains(".innerHTML ="),
+        "dashboard must not assign .innerHTML with dynamic data (XSS risk)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests: /api/status returns 503 when orchestrator is unreachable
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_api_status_returns_503_when_orchestrator_closed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    // Drop the receiver immediately so the sender fails on send
+    let (tx, rx) = mpsc::unbounded_channel::<OrchestratorMsg>();
+    drop(rx);
+
+    let cancel = CancellationToken::new();
+    let cancel_srv = cancel.clone();
+    tokio::spawn(async move {
+        symphony::http_server::start_server(listener, tx, cancel_srv)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{}/api/status", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), 503);
+}
+
+// ---------------------------------------------------------------------------
+// Tests: /api/status returns 503 on orchestrator timeout (time-controlled)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn get_api_status_returns_503_on_orchestrator_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<OrchestratorMsg>();
+    // Orchestrator receives messages but never responds (simulates a hung orchestrator)
+    tokio::spawn(async move {
+        while let Some(_msg) = rx.recv().await { /* intentionally unresponsive */ }
+    });
+
+    let cancel = CancellationToken::new();
+    let cancel_srv = cancel.clone();
+    tokio::spawn(async move {
+        symphony::http_server::start_server(listener, tx, cancel_srv)
+            .await
+            .unwrap();
+    });
+
+    // Yield to let spawned tasks initialise (real I/O is not affected by paused time)
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    let client = reqwest::Client::new();
+    // Send the HTTP request in a separate task so we can advance time concurrently
+    let req_task = tokio::spawn(async move {
+        client
+            .get(format!("{}/api/status", base_url))
+            .send()
+            .await
+            .unwrap()
+    });
+
+    // Yield again to let the request reach the server and block on the oneshot
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    // Advance time past the 5-second ORCHESTRATOR_TIMEOUT
+    tokio::time::advance(Duration::from_secs(6)).await;
+
+    let res = req_task.await.unwrap();
+    assert_eq!(res.status(), 503);
 }
 
 // ---------------------------------------------------------------------------
