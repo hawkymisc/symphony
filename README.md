@@ -145,7 +145,7 @@ hooks:
   after_create:  "./scripts/setup.sh"    # runs once when workspace is first created
   before_run:    "./scripts/prepare.sh"  # runs before each agent invocation (fatal on failure)
   after_run:     "./scripts/cleanup.sh"  # runs after each agent invocation (non-fatal)
-  # before_remove is defined in config but not yet wired up in the orchestrator
+  before_remove: "./scripts/teardown.sh" # runs before workspace removal when issue is abandoned (non-fatal)
   timeout_ms: 60000                      # default: 60 s; applies to all hooks
 ---
 Prompt template here. Available variables:
@@ -177,6 +177,7 @@ Prompt template here. Available variables:
 | Structured logging | `tracing` (human-readable by default); issue_id + identifier in every span |
 | Token aggregation | Input / output tokens tracked across all sessions |
 | Completed issue count | `OrchestratorState.completed` (HashSet) populated on each successful agent turn; `completed_count` exposed in snapshot and dashboard |
+| Workspace cleanup (`before_remove` hook) | `cleanup_workspace` called when a retried issue is found to be terminal or not found; `before_remove` hook fires before directory removal |
 
 ### 🔲 Not Yet Implemented
 
@@ -189,7 +190,6 @@ Prompt template here. Available variables:
 | Config hot-reload | `ConfigReloaded` message exists but doesn't re-parse WORKFLOW.md |
 | Per-state concurrency limits | Global limit only; no per-label / per-project slot control |
 | Rate limit auto-pause | GitHub rate limit headers are tracked but don't auto-pause polling |
-| Workspace cleanup (`before_remove` hook) | `cleanup_workspace` is not called from the orchestrator; before_remove hook never fires |
 | Cache token aggregation | Claude CLI reports cache tokens but they are not forwarded to the runtime aggregator |
 | Priority-based dispatch | GitHub Issues have no native priority field; dispatch always falls back to oldest-first (created_at) |
 

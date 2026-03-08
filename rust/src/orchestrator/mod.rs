@@ -429,17 +429,27 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
             // Re-fetch issue and dispatch if still active
             match self.tracker.fetch_issues_by_ids(&[issue_id.clone()]).await {
                 Ok(issues) => {
-                    let redispatch = issues.into_iter().next()
-                        .filter(|i| i.is_active() && state.running.len() < state.max_concurrent_agents);
-
-                    if let Some(issue) = redispatch {
-                        self.dispatch_issue(state, issue, prior_failures).await;
-                    } else {
-                        // Issue not found, no longer active, or no slots — abandon and clean up
-                        state.claimed.remove(&issue_id);
-                        if let Some(path) = workspace_path {
-                            if let Err(e) = cleanup_workspace(&path, &self.config.hooks).await {
-                                warn!(issue_id = %issue_id, error = %e, "cleanup_workspace failed (non-fatal)");
+                    match issues.into_iter().next() {
+                        Some(issue) if issue.is_active() => {
+                            if state.running.len() < state.max_concurrent_agents {
+                                self.dispatch_issue(state, issue, prior_failures).await;
+                            } else {
+                                // Issue is still open but no slots available right now.
+                                // Release claim so the next poll tick can re-dispatch it.
+                                // Do NOT clean up the workspace — it must be preserved for the next run.
+                                state.claimed.remove(&issue_id);
+                            }
+                        }
+                        _ => {
+                            // Issue not found or terminal — abandon claim and clean up workspace
+                            state.claimed.remove(&issue_id);
+                            if let Some(path) = workspace_path {
+                                let hooks = self.config.hooks.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = cleanup_workspace(&path, &hooks).await {
+                                        warn!(error = %e, "cleanup_workspace failed (non-fatal)");
+                                    }
+                                });
                             }
                         }
                     }

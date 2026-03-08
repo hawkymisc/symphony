@@ -703,6 +703,105 @@ async fn cleanup_workspace_called_when_issue_not_found_on_retry() {
     cancel.cancel();
 }
 
+/// Agent that finishes instantly for one issue ID and blocks (until cancelled) for all others.
+struct FastForOneAgent {
+    fast_id: String,
+}
+
+#[async_trait::async_trait]
+impl AgentRunner for FastForOneAgent {
+    async fn run(
+        &self,
+        issue: &Issue,
+        _attempt: Option<u32>,
+        _config: &AppConfig,
+        _update_tx: mpsc::UnboundedSender<(String, AgentUpdate)>,
+        cancel: CancellationToken,
+    ) -> Result<(), AgentError> {
+        if issue.id == self.fast_id {
+            Ok(()) // finish instantly
+        } else {
+            cancel.cancelled().await; // block until orchestrator shuts down
+            Ok(())
+        }
+    }
+}
+
+/// When handle_retry fires but all concurrency slots are occupied by other running issues,
+/// the workspace must NOT be cleaned up — the issue is still open and will be re-dispatched.
+///
+/// Flow:
+///   1. I_target dispatched, finishes instantly (success) → enters retry_attempts (1s delay)
+///   2. I_blocker added to tracker and dispatched (blocks until cancel) → occupies the single slot
+///   3. I_target's retry timer fires → fetch returns active → slot full → claim released, NO cleanup
+///   4. Workspace directory and before_remove hook must NOT have been triggered
+#[tokio::test]
+async fn workspace_preserved_when_slots_exhausted_on_retry() {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let flag_file = temp_dir.path().join("before_remove_must_not_run");
+
+    // Start with only I_target
+    let tracker = MemoryTracker::with_issues(vec![make_open_issue("I_target", "TARGET")]);
+    let tracker_handle = tracker.clone();
+
+    // I_target finishes instantly; I_blocker blocks until cancel
+    let agent = FastForOneAgent { fast_id: "I_target".to_string() };
+
+    let mut config = make_config(1); // only 1 slot
+    config.polling.interval_ms = 50;
+    config.workspace.root = workspace_root.clone();
+    config.hooks.before_remove = Some(format!("touch {}", flag_file.display()));
+
+    let (orchestrator, tx) = Orchestrator::new(tracker, agent, config);
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
+    tokio::spawn(async move {
+        orchestrator.run(cancel_clone).await;
+    });
+
+    // Wait for I_target to finish and enter retry_attempts (retrying_count = 1, running_count = 0)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx });
+        let snap = timeout(Duration::from_millis(200), reply_rx).await.unwrap().unwrap();
+        if snap.retrying_count == 1 && snap.running_count == 0 {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "Timed out waiting for I_target to enter retry queue");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Add I_blocker to occupy the single slot before I_target's 1s retry fires
+    tracker_handle.add_issue(make_open_issue("I_blocker", "BLOCKER")).await;
+
+    // Wait for I_blocker to be dispatched (running_count = 1)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(OrchestratorMsg::SnapshotRequest { reply: reply_tx });
+        let snap = timeout(Duration::from_millis(200), reply_rx).await.unwrap().unwrap();
+        if snap.running_count >= 1 {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "Timed out waiting for I_blocker to start running");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Wait past I_target's 1s retry delay so handle_retry fires and finds the slot full
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+    // Workspace directory must still exist
+    let target_workspace = workspace_root.join("TARGET");
+    assert!(target_workspace.exists(), "TARGET workspace should NOT be removed when issue is active but slot is exhausted");
+    // before_remove hook must not have fired
+    assert!(!flag_file.exists(), "before_remove hook must not fire when issue is still active (slots exhausted)");
+
+    cancel.cancel();
+}
+
 /// Requesting a snapshot from a running orchestrator returns a valid snapshot.
 #[tokio::test]
 async fn snapshot_returns_valid_data() {
