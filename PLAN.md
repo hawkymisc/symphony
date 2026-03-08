@@ -637,17 +637,83 @@ Each phase follows RED -> GREEN -> REFACTOR.
 5. `runtime_seconds_includes_active`: Snapshot includes live sessions
 6. `rate_limit_tracking`: Latest rate limit info preserved
 
-### Phase 7: HTTP Server (feature-gated, deferred)
+<!-- CODEX_REVIEWED: phases 7-9 completion + open risks documented 2026-03-08 -->
 
-### Phase 8: CLI + Integration
+### Phase 7: HTTP Server (feature-gated, deferred) ✅
 
-**Test scenarios**:
-1. `cli_default_workflow_path`: Uses `./WORKFLOW.md`
-2. `cli_explicit_path`: Uses provided path
-3. `cli_missing_workflow_exits_3`: Exit code 3
-4. `cli_dry_run_validates_and_exits`: `--dry-run` mode
-5. `cli_graceful_shutdown`: SIGTERM -> clean exit 0
-6. `integration_full_cycle`: Issue created -> dispatched -> PR created -> issue closed
+**Shipped**: PR #7 (2026-03-07)
+
+Feature-gated (`--features http-server`) axum 0.8 server bound to 127.0.0.1 only.
+Routes: `GET /` (HTML dashboard), `GET /api/status` (JSON RuntimeSnapshot), `POST /api/refresh`.
+
+**Verification artifacts**: `rust/tests/http_server_test.rs` — 15 tests including
+503-on-timeout (`start_paused=true` + `tokio::time::advance`), XSS assertion
+(no `.innerHTML =` for dynamic data), loopback-only bind check.
+
+**Dependencies / open risks**:
+- `http-server` feature flag must be passed explicitly (`cargo build --features http-server`);
+  default build omits axum/tower-http entirely.
+- No authentication on the dashboard: do not expose the port beyond loopback.
+  Future: add bearer-token or local-socket option if remote access is needed.
+- `--port` flag silently warns (does not error) when feature is disabled; user
+  may be confused. Consider hard-erroring in a future release.
+
+**Pending tasks**:
+- [ ] Consider hard-error (exit 1) when `--port` is used without `http-server` feature.
+- [ ] Add auth option (bearer token / unix socket) before any non-loopback deployment.
+
+### Phase 8: CLI + Integration ✅
+
+**Shipped**: PR #10 (2026-03-08)
+
+**Test scenarios (all passing)**:
+1. `cli_default_workflow_path_searches_cwd` — no WORKFLOW.md → exit 3
+2. `cli_default_workflow_path_uses_cwd_workflow` — valid WORKFLOW.md in CWD + `--dry-run` → exit 0
+3. `cli_explicit_path_uses_provided_file` — custom path + `--dry-run` → exit 0
+4. `cli_explicit_path_missing_exits_3` — non-existent path → exit 3
+5. `cli_dry_run_validates_and_exits` — prints "Config validated successfully"
+6. `cli_dry_run_shows_config_summary` — prints repo + "Max concurrent agents"
+7. `cli_dry_run_invalid_config_exits_1` — bad repo format → exit 1
+8. `cli_graceful_shutdown_on_sigterm` (unix only) — hanging TCP server → SIGTERM → exit 0
+
+**Exit code contract**:
+| Code | Meaning |
+|------|---------|
+| 0 | Normal shutdown (SIGTERM/SIGINT) or `--dry-run` success |
+| 1 | Startup validation failure (config error) |
+| 2 | CLI argument error (handled by clap automatically) |
+| 3 | Workflow file error (missing / unreadable / invalid YAML) |
+
+**Integration tests (4, in `rust/tests/integration_test.rs`)**:
+- `integration_full_cycle_dispatch_and_completion`
+- `integration_snapshot_shows_running_while_agent_active`
+- `integration_full_cycle_multiple_issues_dispatched`
+- `integration_closed_issue_never_dispatched`
+
+**Dependencies / open risks**:
+- `cli_graceful_shutdown_on_sigterm` uses a loopback TCP server that accepts but
+  never responds; the test is `#[cfg(unix)]` only — Windows ctrl_c path untested.
+- Integration tests use `MemoryTracker` (in-process); real GitHub API is not
+  exercised. Add a smoke-test against staging GitHub repo before production deploy.
+- `assert_cmd` rebuilds the binary per test run; first run is slow on cold cache.
+
+**Pending tasks**:
+- [ ] Add Windows graceful-shutdown test using `GenerateConsoleCtrlEvent` once
+      Windows CI runner is available.
+- [ ] Smoke-test against a real GitHub repo (staging) as a separate CI gate.
+
+### Phase 9: Orchestrator Refactoring ✅
+
+**Shipped**: PR #11 (2026-03-08)
+
+Extracted `Orchestrator::cancel_all_agents(state: &OrchestratorState)` static helper
+to deduplicate the cancel-all-running-agents pattern that appeared 4 times in the
+event loop (interval tick, Tick message, RetryIssue, RefreshRequest).
+Behaviour and cancel safety are unchanged; all 145 tests continue to pass.
+
+**Pending tasks**:
+- [ ] Consider further deduplication of the full `tokio::select! { biased; cancel => ... }`
+      wrapper via a macro or helper if a fifth call site appears.
 
 ## Risk Mitigation (Revised)
 
