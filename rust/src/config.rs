@@ -370,11 +370,11 @@ impl AppConfig {
             return Err(ConfigError::MissingClaudeCommand);
         }
 
-        // Validate permission settings
+        // Validate permission settings (SPEC §10.6)
+        // Without skip_permissions or allowed_tools, Claude Code enters interactive permission
+        // mode and hangs waiting on stdin, which Symphony never writes to.
         if !self.claude.skip_permissions && self.claude.allowed_tools.is_none() {
-            // This is actually valid - it means the agent will ask for permission interactively
-            // For unattended mode, user should set one of these
-            // We just log a warning, not an error
+            return Err(ConfigError::PermissionConfigError);
         }
 
         Ok(())
@@ -617,6 +617,48 @@ mod tests {
                   repo: "owner/repo"
                 claude:
                   command: "claude"
+                  skip_permissions: true
+            "#).unwrap(),
+            prompt_template: String::new(),
+            path: String::new(),
+        };
+
+        let config = AppConfig::from_workflow(&workflow).unwrap();
+        let result = config.validate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn config_validate_permission_config_error() {
+        let workflow = crate::workflow::LoadedWorkflow {
+            config: serde_yaml::from_str(r#"
+                tracker:
+                  api_key: "test"
+                  repo: "owner/repo"
+                claude:
+                  command: "claude"
+            "#).unwrap(),
+            prompt_template: String::new(),
+            path: String::new(),
+        };
+
+        let config = AppConfig::from_workflow(&workflow).unwrap();
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::PermissionConfigError)));
+    }
+
+    #[test]
+    fn config_validate_allowed_tools_passes() {
+        let workflow = crate::workflow::LoadedWorkflow {
+            config: serde_yaml::from_str(r#"
+                tracker:
+                  api_key: "test"
+                  repo: "owner/repo"
+                claude:
+                  command: "claude"
+                  allowed_tools:
+                    - "Bash"
+                    - "Read"
             "#).unwrap(),
             prompt_template: String::new(),
             path: String::new(),

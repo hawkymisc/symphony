@@ -19,6 +19,8 @@ tracker:
   kind: github
   repo: "test/repo"
   api_key: "ghp_test_token_12345"
+claude:
+  skip_permissions: true
 ---
 Test prompt
 "#;
@@ -192,7 +194,7 @@ fn cli_graceful_shutdown_on_sigterm() {
     });
 
     let workflow_content = format!(
-        "---\ntracker:\n  kind: github\n  repo: \"test/repo\"\n  api_key: \"ghp_test_token_12345\"\n  endpoint: \"http://127.0.0.1:{}/graphql\"\n---\nTest prompt\n",
+        "---\ntracker:\n  kind: github\n  repo: \"test/repo\"\n  api_key: \"ghp_test_token_12345\"\n  endpoint: \"http://127.0.0.1:{}/graphql\"\nclaude:\n  skip_permissions: true\n---\nTest prompt\n",
         hanging_port
     );
 
