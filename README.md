@@ -29,7 +29,7 @@ The Rust implementation connects **GitHub Issues** with the **Claude Code CLI** 
 
 - Rust 1.75+
 - [`claude` CLI](https://claude.ai/code) installed and authenticated
-- GitHub personal access token with `repo` scope
+- GitHub personal access token (see [Security & Token Setup](#security--token-setup) for scopes)
 
 ### Quick Start
 
@@ -156,6 +156,61 @@ Prompt template here. Available variables:
 {{ repo }}               — "owner/repo"
 {{ attempt }}            — retry attempt number (1-indexed; absent on first run)
 ```
+
+---
+
+## Security & Token Setup
+
+### Token Architecture
+
+Symphony uses a single `GITHUB_TOKEN` for two purposes:
+
+| Consumer | Operations | Why it needs the token |
+|----------|-----------|----------------------|
+| **Symphony** (main process) | Issue polling via GraphQL API | Reads issues to find work |
+| **Claude Code** (child process) | `git push`, `gh pr create`, `gh issue comment` | Implements changes and opens PRs |
+
+> **Important**: The `GITHUB_TOKEN` environment variable is inherited by Claude Code child processes. This is by design — Claude Code needs it to push branches and create PRs via `gh`.
+
+### Recommended: Fine-grained Personal Access Token
+
+Use a [fine-grained PAT](https://github.com/settings/personal-access-tokens/new) scoped to the target repository only:
+
+| Scope | Permission | Reason |
+|-------|-----------|--------|
+| **Contents** | Read and Write | `git push` from Claude Code |
+| **Issues** | Read and Write | Polling (Symphony) + commenting (Claude Code) |
+| **Pull Requests** | Read and Write | `gh pr create` from Claude Code |
+| **Metadata** | Read-only | Auto-granted |
+
+```bash
+# Dedicated fine-grained PAT (single repo, minimal scopes)
+export GITHUB_TOKEN=github_pat_xxxxxxxxxxxx
+```
+
+### Avoid: Classic PATs and `gh auth token`
+
+| Method | Risk |
+|--------|------|
+| Classic PAT with `repo` scope | Grants write access to **all** repositories |
+| `gh auth token` | Returns the `gh` CLI's OAuth token, often with broad org-wide scopes |
+
+Both work for development/testing, but for unattended production use, a fine-grained PAT limits the blast radius if the token is leaked or misused by the agent.
+
+### `skip_permissions` and Agent Sandboxing
+
+```yaml
+claude:
+  skip_permissions: true   # ⚠️ Gives Claude Code full system access
+```
+
+When `skip_permissions: true`, Claude Code runs with `--dangerously-skip-permissions`, meaning it can execute arbitrary shell commands, read/write any file, and access all environment variables (including `GITHUB_TOKEN`).
+
+**Mitigations**:
+- Run Symphony in an isolated environment (container, VM, or dedicated user)
+- Use a fine-grained PAT scoped to a single repository
+- Set `allowed_tools` in config to restrict Claude Code's tool access (alternative to `skip_permissions`)
+- The HTTP dashboard binds to `127.0.0.1` only — do not expose to the network
 
 ---
 
