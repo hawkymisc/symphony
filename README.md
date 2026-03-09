@@ -175,9 +175,12 @@ Prompt template here. Available variables:
 | Observability snapshot | `RuntimeSnapshot` via internal message channel |
 | HTTP dashboard | Feature-gated (`--features http-server`); `GET /`, `GET /api/status`, `POST /api/refresh` |
 | Structured logging | `tracing` (human-readable by default); issue_id + identifier in every span |
-| Token aggregation | Input / output tokens tracked across all sessions |
-| Completed issue count | `OrchestratorState.completed` (HashSet) populated on each successful agent turn; `completed_count` exposed in snapshot and dashboard |
+| Token aggregation | Input / output / cache-read / cache-creation tokens tracked across all sessions |
+| Completed issue count | `OrchestratorState.completed_count` (u64, monotonically increasing); exposed in snapshot and dashboard |
 | Workspace cleanup (`before_remove` hook) | `cleanup_workspace` called when a retried issue is found to be terminal or not found; `before_remove` hook fires before directory removal |
+| Tracker failure backoff | Consecutive tracker poll failures trigger exponential backoff (capped at 5 min); non-blocking via `skip_ticks_until` |
+| API key masking | `TrackerConfig` and `GitHubConfig` custom `Debug` impls replace `api_key` with `[REDACTED]` |
+| Retry queue eviction | `max_retry_queue_size` (default 1000); oldest entry evicted when full, workspace cleaned up asynchronously |
 
 ### 🔲 Not Yet Implemented
 
@@ -189,8 +192,6 @@ Prompt template here. Available variables:
 | Real-GitHub CI gate | Integration tests use `MemoryTracker`; no staging smoke test |
 | Config hot-reload | `ConfigReloaded` message exists but doesn't re-parse WORKFLOW.md |
 | Per-state concurrency limits | Global limit only; no per-label / per-project slot control |
-| Rate limit auto-pause | GitHub rate limit headers are tracked but don't auto-pause polling |
-| Cache token aggregation | Claude CLI reports cache tokens but they are not forwarded to the runtime aggregator |
 | Priority-based dispatch | GitHub Issues have no native priority field; dispatch always falls back to oldest-first (created_at) |
 
 ---
