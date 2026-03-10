@@ -202,7 +202,28 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
             }
         }
 
+        // Graceful shutdown: remove symphony-doing labels from all running/claimed issues
+        // so a restarted orchestrator can pick them up again.
+        self.cleanup_labels_on_shutdown(&state).await;
+
         info!("Orchestrator stopped");
+    }
+
+    /// Remove `symphony-doing` labels from all in-flight issues on shutdown.
+    /// Best-effort: failures are logged but do not prevent shutdown.
+    async fn cleanup_labels_on_shutdown(&self, state: &OrchestratorState) {
+        for (_, entry) in state.running.iter() {
+            if let Err(e) = self.tracker.remove_label(&entry.identifier, "symphony-doing").await {
+                warn!(identifier = %entry.identifier, error = %e, "Failed to remove symphony-doing on shutdown (non-fatal)");
+            }
+        }
+        for (issue_id, retry_entry) in state.retry_attempts.iter() {
+            if let Some(ref ident) = retry_entry.identifier {
+                if let Err(e) = self.tracker.remove_label(ident, "symphony-doing").await {
+                    warn!(issue_id = %issue_id, error = %e, "Failed to remove symphony-doing for retrying issue on shutdown (non-fatal)");
+                }
+            }
+        }
     }
 
     async fn handle_tick(&self, state: &mut OrchestratorState) {
@@ -268,6 +289,11 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
         let identifier = issue.identifier.clone();
 
         info!(issue_id = %issue_id, identifier = %identifier, "Dispatching issue");
+
+        // Add symphony-doing label (best-effort, non-fatal)
+        if let Err(e) = self.tracker.add_label(&identifier, "symphony-doing").await {
+            warn!(identifier = %identifier, error = %e, "Failed to add symphony-doing label (non-fatal)");
+        }
 
         // Mark as claimed
         state.claimed.insert(issue_id.clone());
@@ -369,6 +395,12 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
             let workspace_path = entry.workspace_path.clone();
             let elapsed_secs = (chrono::Utc::now() - entry.started_at).num_milliseconds().max(0) as u64 / 1000;
             state.agent_totals.add_seconds(elapsed_secs);
+
+            // Remove symphony-doing label so a fresh orchestrator instance can
+            // recover this issue after a restart (best-effort, non-fatal).
+            if let Err(e) = self.tracker.remove_label(&identifier, "symphony-doing").await {
+                warn!(identifier = %identifier, error = %e, "Failed to remove symphony-doing label on worker finish (non-fatal)");
+            }
 
             match result {
                 Ok(()) => {
@@ -486,7 +518,7 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
             match self.tracker.fetch_issues_by_ids(std::slice::from_ref(&issue_id)).await {
                 Ok(issues) => {
                     match issues.into_iter().next() {
-                        Some(issue) if issue.is_active() => {
+                        Some(issue) if issue.is_continuable() => {
                             if state.running.len() < state.max_concurrent_agents {
                                 self.dispatch_issue(state, issue, prior_failures).await;
                             } else {
@@ -514,7 +546,13 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
                             }
                         }
                         _ => {
-                            // Issue not found or terminal — abandon claim and clean up workspace
+                            // Issue not found or terminal or done — abandon claim and clean up
+                            // Remove symphony-doing label (best-effort)
+                            if let Some(ref ident) = entry_identifier {
+                                if let Err(e) = self.tracker.remove_label(ident, "symphony-doing").await {
+                                    warn!(identifier = %ident, error = %e, "Failed to remove symphony-doing label (non-fatal)");
+                                }
+                            }
                             state.claimed.remove(&issue_id);
                             if let Some(path) = workspace_path {
                                 let hooks = self.config.hooks.clone();
@@ -587,6 +625,10 @@ impl<T: Tracker + 'static, A: AgentRunner + 'static> Orchestrator<T, A> {
             if let Some(entry) = state.running.remove(&id) {
                 entry.cancel_token.cancel();
                 state.claimed.remove(&id);
+                // Remove symphony-doing label (best-effort)
+                if let Err(e) = self.tracker.remove_label(&entry.identifier, "symphony-doing").await {
+                    warn!(identifier = %entry.identifier, error = %e, "Failed to remove symphony-doing label on reconcile (non-fatal)");
+                }
             }
         }
     }
