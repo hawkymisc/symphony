@@ -90,6 +90,7 @@ Config validated successfully
   Tracker: github (owner/your-repo)
   Model: claude-sonnet-4-20250514
   Max concurrent agents: 3
+  Poll interval: 30000ms
 ```
 
 **5. 运行**
@@ -128,7 +129,9 @@ tracker:
 
 agent:
   max_concurrent_agents: 10  # 默认：10
+  max_turns: 20              # 默认：20；放弃前的最大编排器级重试次数
   max_retry_backoff_ms: 300000  # 默认：5 分钟
+  max_retry_queue_size: 1000    # 默认：1000；满时驱逐最旧条目
 
 polling:
   interval_ms: 30000         # 默认：30 秒
@@ -138,6 +141,10 @@ claude:
   model: "claude-sonnet-4-20250514"
   max_turns_per_invocation: 50
   skip_permissions: false    # 仅在可信环境中设置为 true
+  allowed_tools:             # skip_permissions=false 时必填；允许的工具列表
+    - "Bash"
+    - "Read"
+    - "Write"
 
 workspace:
   root: "~/symphony-workspaces"  # 默认：$TMPDIR/symphony_workspaces

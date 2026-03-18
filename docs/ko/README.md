@@ -90,6 +90,7 @@ Config validated successfully
   Tracker: github (owner/your-repo)
   Model: claude-sonnet-4-20250514
   Max concurrent agents: 3
+  Poll interval: 30000ms
 ```
 
 **5. 실행**
@@ -128,7 +129,9 @@ tracker:
 
 agent:
   max_concurrent_agents: 10  # 기본값: 10
+  max_turns: 20              # 기본값: 20; 포기 전 최대 오케스트레이터 레벨 재시도 횟수
   max_retry_backoff_ms: 300000  # 기본값: 5분
+  max_retry_queue_size: 1000    # 기본값: 1000; 가득 차면 가장 오래된 항목 퇴거
 
 polling:
   interval_ms: 30000         # 기본값: 30초
@@ -138,6 +141,10 @@ claude:
   model: "claude-sonnet-4-20250514"
   max_turns_per_invocation: 50
   skip_permissions: false    # 신뢰할 수 있는 환경에서만 true로 설정
+  allowed_tools:             # skip_permissions=false인 경우 필수; 허용된 도구 목록
+    - "Bash"
+    - "Read"
+    - "Write"
 
 workspace:
   root: "~/symphony-workspaces"  # 기본값: $TMPDIR/symphony_workspaces

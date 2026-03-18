@@ -90,6 +90,7 @@ Config validated successfully
   Tracker: github (owner/your-repo)
   Model: claude-sonnet-4-20250514
   Max concurrent agents: 3
+  Poll interval: 30000ms
 ```
 
 **5. 実行**
@@ -128,7 +129,9 @@ tracker:
 
 agent:
   max_concurrent_agents: 10  # デフォルト: 10
+  max_turns: 20              # デフォルト: 20; 放棄前のオーケストレータレベル最大リトライ回数
   max_retry_backoff_ms: 300000  # デフォルト: 5分
+  max_retry_queue_size: 1000    # デフォルト: 1000; 満杯時は最古のエントリをエビクション
 
 polling:
   interval_ms: 30000         # デフォルト: 30秒
@@ -138,6 +141,10 @@ claude:
   model: "claude-sonnet-4-20250514"
   max_turns_per_invocation: 50
   skip_permissions: false    # 信頼できる環境でのみ true に設定
+  allowed_tools:             # skip_permissions=false の場合は必須; 許可するツールのリスト
+    - "Bash"
+    - "Read"
+    - "Write"
 
 workspace:
   root: "~/symphony-workspaces"  # デフォルト: $TMPDIR/symphony_workspaces
